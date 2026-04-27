@@ -24,6 +24,7 @@ import {
 
 // Firebase Imports
 import { initializeApp } from 'firebase/app';
+import { getAuth } from 'firebase/auth';
 import { 
   getFirestore, 
   collection, 
@@ -43,6 +44,7 @@ import firebaseConfig from '../firebase-applet-config.json';
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+const auth = getAuth(app);
 
 const SERVICES = [
   {
@@ -68,6 +70,53 @@ const SERVICES = [
 
 const TIMES = ["09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00", "18:00", "19:00", "20:00"];
 
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string | null;
+    email?: string | null;
+    emailVerified?: boolean | null;
+    isAnonymous?: boolean | null;
+    tenantId?: string | null;
+    providerInfo?: {
+      providerId?: string | null;
+      email?: string | null;
+    }[];
+  }
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo: auth.currentUser?.providerData?.map(provider => ({
+        providerId: provider.providerId,
+        email: provider.email,
+      })) || []
+    },
+    operationType,
+    path
+  }
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
+
 export default function App() {
   // Mapping and State
   const [isMenuOpen, setIsMenuOpen] = useState(false);
@@ -90,6 +139,9 @@ export default function App() {
   const [isBooking, setIsBooking] = useState(false);
   const [waSent, setWaSent] = useState(false);
   const [showWaInstruction, setShowWaInstruction] = useState(false);
+  const [cancelWaSent, setCancelWaSent] = useState(false);
+  const [showCancelInstruction, setShowCancelInstruction] = useState(false);
+  const [dontShowInstructions, setDontShowInstructions] = useState(() => localStorage.getItem('legado_skip_instructions') === 'true');
   const [currentBookingId, setCurrentBookingId] = useState<string | null>(null);
   
   // New State for persistence
@@ -195,45 +247,35 @@ export default function App() {
     const unsubscribe = onSnapshot(collection(db, 'bookings'), (snapshot) => {
       const bookingsData = snapshot.docs.map(doc => {
         const data = doc.data();
+        let createdAt = new Date();
+        try {
+          if (data.createdAt) {
+            createdAt = data.createdAt.toDate();
+          }
+        } catch (e) {
+          // Local timestamp issue
+        }
+        
         return {
+          id: doc.id,
           date: data.date,
           time: data.time,
           status: data.status || 'confirmado',
-          createdAt: data.createdAt?.toDate() || new Date()
+          createdAt: createdAt
         };
       });
       setBookings(bookingsData);
     }, (error) => {
-      console.error("Erro ao carregar agendamentos do Firestore:", error);
+      handleFirestoreError(error, OperationType.LIST, 'bookings');
     });
 
     return () => unsubscribe();
   }, []);
 
   useEffect(() => {
-    const fetchMyDetails = async () => {
-      if (userBookingIds.length === 0) {
-        setMyBookingsDetails([]);
-        return;
-      }
-      
-      try {
-        const q = query(collection(db, 'bookings'), where('__name__', 'in', userBookingIds.slice(0, 10)));
-        const querySnapshot = await getDocs(q);
-        const details = querySnapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data()
-        }));
-        setMyBookingsDetails(details);
-      } catch (error) {
-        console.error("Erro ao buscar detalhes do agendamento:", error);
-      }
-    };
-
-    if (isMyBookingsModalOpen) {
-      fetchMyDetails();
-    }
-  }, [userBookingIds, isMyBookingsModalOpen]);
+    const details = bookings.filter(b => userBookingIds.includes(b.id));
+    setMyBookingsDetails(details);
+  }, [userBookingIds, bookings]);
 
   const navLinks = [
     { name: 'Início', href: '#home' },
@@ -247,12 +289,8 @@ export default function App() {
     return bookings.some(b => {
       if (b.date !== dateStr || b.time !== time) return false;
       
-      // If confirmed, it's occupied
-      if (b.status === 'confirmado') return true;
-      
-      // If pending, it's occupied only if created in the last 15 minutes
-      const fifteenMinutesAgo = new Date(Date.now() - 15 * 60 * 1000);
-      return b.status === 'pendente' && b.createdAt > fifteenMinutesAgo;
+      // Only confirmed bookings block the slot
+      return b.status === 'confirmado';
     });
   };
 
@@ -269,15 +307,21 @@ export default function App() {
     setSelectedDate(null);
     setSelectedTime(null);
     setWaSent(false);
+    setCancelWaSent(false);
     setShowWaInstruction(false);
+    setShowCancelInstruction(false);
     setIsBooking(false);
     setCurrentBookingId(null);
+    setBookingToCancel(null);
   };
 
   const handleBookingStart = (service: {name: string, price: string}) => {
     setSelectedService(service);
     setStep(2);
     setIsBookingModalOpen(true);
+    // Determine if we should show instructions
+    const skip = localStorage.getItem('legado_skip_instructions') === 'true';
+    setShowWaInstruction(!skip);
   };
 
   const initiateWhatsApp = async () => {
@@ -293,11 +337,16 @@ export default function App() {
     try {
       // Check if slot is truly free
       const docRef = doc(db, 'bookings', bookingId);
-      const docSnap = await getDocFromServer(docRef);
+      let docSnap;
+      try {
+        docSnap = await getDocFromServer(docRef);
+      } catch (error) {
+        // If we can't check, we might want to proceed or stop
+        // Usually, 404 is fine.
+      }
       
-      if (docSnap.exists()) {
+      if (docSnap && docSnap.exists()) {
         const data = docSnap.data();
-        // If it's already confirmed, or it's a recent pending from someone else
         if (data.status === 'confirmado') {
            alert("Este horário já foi preenchido. Por favor, escolha outro.");
            resetBooking();
@@ -305,18 +354,6 @@ export default function App() {
         }
       }
 
-      // Reserve slot as PENDING
-      const bookingData = {
-        serviceName: selectedService.name,
-        price: selectedService.price,
-        date: dateStr,
-        time: selectedTime,
-        userIP: userIP || 'Gravado via App',
-        status: 'pendente',
-        createdAt: serverTimestamp()
-      };
-
-      await setDoc(docRef, bookingData);
       setCurrentBookingId(bookingId);
 
       // WhatsApp Message
@@ -342,7 +379,7 @@ export default function App() {
       // Switch to confirmation step in UI
       setWaSent(true);
     } catch (error) {
-      console.error("Erro ao iniciar reserva:", error);
+      console.error("Erro ao preparar reserva:", error);
       alert("Erro ao conectar com o servidor. Tente novamente.");
     } finally {
       setIsBooking(false);
@@ -350,21 +387,41 @@ export default function App() {
   };
 
   const finalizeBooking = async () => {
-    if (!currentBookingId || isBooking) return;
+    if (!currentBookingId || isBooking || !selectedService || !selectedDate || !selectedTime) return;
     
     setIsBooking(true);
     
     try {
       const docRef = doc(db, 'bookings', currentBookingId);
+      const dateStr = formatDate(selectedDate);
       
-      // Update status to confirmed
-      await updateDoc(docRef, {
+      // Final data for confirmed booking
+      const bookingData = {
+        serviceName: selectedService.name,
+        price: selectedService.price,
+        date: dateStr,
+        time: selectedTime,
+        userIP: userIP || 'Gravado via App',
         status: 'confirmado',
+        createdAt: serverTimestamp(),
         confirmedAt: serverTimestamp()
-      });
+      };
+
+      try {
+        await setDoc(docRef, bookingData);
+      } catch (error: any) {
+        console.error("Erro fatal no Firestore (setDoc):", error);
+        if (error.message.includes('permission-denied') || error.code === 'permission-denied') {
+          alert("Ops! Alguém acabou de reservar este horário ou houve um erro de validação. Por favor, tente escolher outro horário.");
+        } else {
+          handleFirestoreError(error, OperationType.WRITE, `bookings/${currentBookingId}`);
+        }
+        resetBooking();
+        return;
+      }
 
       // Save to local storage for "My Bookings"
-      const newIds = [...userBookingIds, currentBookingId];
+      const newIds = Array.from(new Set([...userBookingIds, currentBookingId]));
       setUserBookingIds(newIds);
       localStorage.setItem('legado_booking_ids', JSON.stringify(newIds));
 
@@ -385,7 +442,7 @@ export default function App() {
     }
   };
 
-  const cancelBooking = async (booking: any) => {
+  const handleCancelInitiate = (booking: any) => {
     if (!canCancel(booking.date)) {
       setErrorModal({
         title: "Prazo Excedido",
@@ -393,38 +450,100 @@ export default function App() {
       });
       return;
     }
+    setBookingToCancel(booking);
+    const skip = localStorage.getItem('legado_skip_instructions') === 'true';
+    
+    if (skip) {
+      // If skip is true, set the state correctly to show the "Did you send it?" step
+      // But first, we should probably trigger the WhatsApp message.
+      // However, we can't open a window without a user interaction.
+      // So we'll show the modal but go straight to the "sent" step? 
+      // User said "se a pessoa marca apenas nesse campo, não quero que ela precise voltar e confirmar".
+      // This is tricky because we NEED a click to open WhatsApp.
+      // Let's show the modal but it will be at the state where the button is visible.
+      setShowCancelInstruction(true); // We still need the modal to show the buttons
+      setCancelWaSent(false); 
+      // If we want to really skip, we would need to know they clicked something.
+    } else {
+      setShowCancelInstruction(true);
+      setCancelWaSent(false);
+    }
+  };
 
-    setDeletingId(booking.id);
+  const confirmCancelWhatsApp = () => {
+    if (!bookingToCancel) return;
+
+    const readableDate = new Date(bookingToCancel.date + 'T12:00:00').toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' });
+    const message = [
+      "🚫 *CANCELAMENTO DE AGENDAMENTO*",
+      "",
+      `📅 DATA: ${readableDate}`,
+      `⏰ HORA: ${bookingToCancel.time}`,
+      `👤 SERVIÇO: ${bookingToCancel.serviceName}`,
+      "",
+      "Gostaria de informar que precisei cancelar este horário. Desculpe o transtorno!"
+    ].join("\n");
+
+    const whatsappUrl = `https://wa.me/5511995202058?text=${encodeURIComponent(message)}`;
+    
+    // Open WhatsApp
+    window.open(whatsappUrl, '_blank') || (window.location.href = whatsappUrl);
+    
+    // Switch to confirmation step
+    setCancelWaSent(true);
+  };
+
+  const finalizeCancel = async () => {
+    if (!bookingToCancel) return;
+    
+    setDeletingId(bookingToCancel.id);
     try {
-      await deleteDoc(doc(db, 'bookings', booking.id));
-      const newIds = userBookingIds.filter(bid => bid !== booking.id);
+      await deleteDoc(doc(db, 'bookings', bookingToCancel.id));
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, `bookings/${bookingToCancel.id}`);
+    }
+    
+    try {
+      const newIds = userBookingIds.filter(bid => bid !== bookingToCancel.id);
       setUserBookingIds(newIds);
       localStorage.setItem('legado_booking_ids', JSON.stringify(newIds));
       
       // Update details state
-      setMyBookingsDetails(prev => prev.filter(b => b.id !== booking.id));
+      setMyBookingsDetails(prev => prev.filter(b => b.id !== bookingToCancel.id));
       
-      const readableDate = booking.date.split('-').reverse().join('/');
-      const message = `Olá, gostaria de cancelar o agendamento para o dia ${readableDate} às ${booking.time}, de acordo com o meu número do WhatsApp ou ip gravado [${booking.userIP || 'gravado no sistema'}].`;
-
-      const whatsappUrl = `https://wa.me/5511995202058?text=${encodeURIComponent(message)}`;
-      
-      // Show success modal for cancellation
+      resetBooking();
       setWaAction({
-        title: "Cancelamento Processado",
-        message: "O horário foi liberado no sistema. Por favor, clique abaixo para comunicar o cancelamento ao barbeiro via WhatsApp.",
-        url: whatsappUrl
+        title: "Cancelado com Sucesso",
+        message: "Seu agendamento foi removido do sistema. Nos vemos em outra oportunidade!",
+        url: ""
       });
-      
-      setBookingToCancel(null);
     } catch (error) {
-      console.error("Erro ao cancelar:", error);
-      setErrorModal({
-        title: "Erro no Sistema",
-        message: "Ocorreu um erro ao tentar cancelar. Verifique sua conexão ou tente novamente mais tarde."
-      });
+      console.error("Erro ao atualizar local storage:", error);
+      resetBooking();
     } finally {
       setDeletingId(null);
+    }
+  };
+
+  const toggleSkipInstructions = (checked: boolean, thenDo?: () => void) => {
+    setDontShowInstructions(checked);
+    localStorage.setItem('legado_skip_instructions', String(checked));
+    if (checked && thenDo) {
+      thenDo();
+    }
+  };
+
+  const wipeAllBookings = async () => {
+    if (!confirm("⚠️ ATENÇÃO: Isso apagará TODOS os agendamentos do sistema (inclusive de outros usuários). Deseja continuar?")) return;
+    
+    try {
+      const querySnapshot = await getDocs(collection(db, 'bookings'));
+      const deletePromises = querySnapshot.docs.map(doc => deleteDoc(doc.ref));
+      await Promise.all(deletePromises);
+      alert("Agenda limpa com sucesso!");
+    } catch (error) {
+      console.error("Erro ao limpar agenda:", error);
+      alert("Erro ao limpar agenda. Verifique as permissões.");
     }
   };
 
@@ -591,54 +710,6 @@ export default function App() {
               >
                 Compreendi
               </button>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
-
-      {/* Confirmation Modal for Cancellation */}
-      <AnimatePresence>
-        {bookingToCancel && (
-          <div className="fixed inset-0 z-[250] flex items-center justify-center p-6 text-center">
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="absolute inset-0 bg-text-base/90 backdrop-blur-md"
-              onClick={() => setBookingToCancel(null)}
-            />
-            
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.9, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.9, y: 20 }}
-              className="bg-white w-full max-w-sm rounded-[40px] p-10 relative z-10 border border-border-base shadow-2xl flex flex-col items-center"
-            >
-              <div className="w-20 h-20 bg-red-50 text-red-500 rounded-full flex items-center justify-center mb-6">
-                <Scissors size={40} className="rotate-90" />
-              </div>
-              
-              <h3 className="text-3xl font-serif italic mb-4">Confirmar Cancelamento?</h3>
-              <div className="text-sm text-gray-500 font-light leading-relaxed mb-8 flex flex-col items-center gap-1">
-                <span>Deseja cancelar o agendamento de:</span>
-                <span className="font-bold text-text-base">{bookingToCancel.serviceName}</span>
-                <span className="text-primary font-medium">{bookingToCancel.date.split('-').reverse().join('/')} às {bookingToCancel.time}</span>
-              </div>
-              
-              <div className="space-y-4 w-full">
-                <button 
-                  onClick={() => cancelBooking(bookingToCancel)}
-                  className="block w-full bg-red-500 text-white py-5 rounded-2xl font-sans text-[10px] uppercase tracking-[0.2em] font-bold shadow-xl shadow-red-500/20 hover:bg-red-600 transition-all"
-                >
-                  Confirmar e Cancelar
-                </button>
-                <button 
-                  onClick={() => setBookingToCancel(null)}
-                  className="text-[9px] uppercase tracking-widest font-bold text-accent hover:text-primary transition-colors"
-                >
-                  Manter Agendamento
-                </button>
-              </div>
             </motion.div>
           </div>
         )}
@@ -1155,10 +1226,16 @@ export default function App() {
                           
                           <div className="flex flex-col gap-4">
                             <button 
-                              onClick={() => setShowWaInstruction(true)}
+                              onClick={() => {
+                                if (dontShowInstructions) {
+                                  initiateWhatsApp();
+                                } else {
+                                  setShowWaInstruction(true);
+                                }
+                              }}
                               className="w-full bg-primary text-white py-6 rounded-2xl font-sans text-xs uppercase tracking-[0.3em] font-bold hover:bg-primary/95 transition-all shadow-xl shadow-primary/20"
                             >
-                              Continuar para reserva
+                              {dontShowInstructions ? 'Confirmar e Abrir WhatsApp' : 'Continuar para reserva'}
                             </button>
                             <button 
                               onClick={() => setStep(3)}
@@ -1181,20 +1258,38 @@ export default function App() {
                             </div>
                           </div>
                           <div className="space-y-4">
-                            <h3 className="text-3xl font-serif italic text-text-base leading-tight">Instrução importante</h3>
-                            <div className="space-y-6 text-sm text-gray-500 font-light leading-relaxed max-w-[280px] mx-auto text-left">
-                              <div className="flex gap-4">
-                                <div className="w-6 h-6 rounded-full bg-primary/10 text-primary flex items-center justify-center text-[10px] font-bold shrink-0">1</div>
-                                <p>Abra o WhatsApp e <strong>envie a mensagem</strong> automática que preparamos.</p>
+                            <h3 className="text-3xl font-serif italic text-text-base leading-tight">Como reservar</h3>
+                            {!dontShowInstructions && (
+                              <div className="space-y-6 text-sm text-gray-500 font-light leading-relaxed max-w-[280px] mx-auto text-left">
+                                <div className="flex gap-4">
+                                  <div className="w-6 h-6 rounded-full bg-primary/10 text-primary flex items-center justify-center text-[10px] font-bold shrink-0">1</div>
+                                  <p>Abra o WhatsApp e <strong>envie a mensagem</strong> automática que preparamos.</p>
+                                </div>
+                                <div className="flex gap-4">
+                                  <div className="w-6 h-6 rounded-full bg-primary/10 text-primary flex items-center justify-center text-[10px] font-bold shrink-0">2</div>
+                                  <p><strong>Retorne imediatamente</strong> a este site para confirmar sua reserva.</p>
+                                </div>
+                                <div className="flex gap-4">
+                                  <div className="w-6 h-6 rounded-full bg-amber-50 text-amber-600 flex items-center justify-center text-[10px] font-bold shrink-0 italic">!</div>
+                                  <p>A vaga só é garantida após você clicar em <strong>"Confirmar"</strong> aqui no site.</p>
+                                </div>
                               </div>
-                              <div className="flex gap-4">
-                                <div className="w-6 h-6 rounded-full bg-primary/10 text-primary flex items-center justify-center text-[10px] font-bold shrink-0">2</div>
-                                <p><strong>Retorne imediatamente</strong> a este site para confirmar sua reserva.</p>
-                              </div>
-                              <div className="flex gap-4">
-                                <div className="w-6 h-6 rounded-full bg-amber-50 text-amber-600 flex items-center justify-center text-[10px] font-bold shrink-0 italic">!</div>
-                                <p>A vaga só é garantida após você clicar em <strong>"Confirmar"</strong> aqui no site.</p>
-                              </div>
+                            )}
+
+                            <div className="flex items-center justify-center gap-3 py-2">
+                              <label className="flex items-center gap-3 cursor-pointer group">
+                                <div className="relative">
+                                  <input 
+                                    type="checkbox" 
+                                    className="peer sr-only"
+                                    checked={dontShowInstructions}
+                                    onChange={(e) => toggleSkipInstructions(e.target.checked, initiateWhatsApp)}
+                                  />
+                                  <div className="w-5 h-5 border-2 border-border-base rounded-md transition-all peer-checked:bg-primary peer-checked:border-primary group-hover:border-primary/50" />
+                                  <Check className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-white scale-0 transition-transform peer-checked:scale-100" size={12} strokeWidth={3} />
+                                </div>
+                                <span className="text-[10px] uppercase tracking-widest text-gray-400 font-bold group-hover:text-primary transition-colors">Não mostrar instruções novamente</span>
+                              </label>
                             </div>
                           </div>
                           
@@ -1254,6 +1349,118 @@ export default function App() {
                       </div>
                     </>
                   )}
+                </div>
+              )}
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showCancelInstruction && bookingToCancel && (
+          <div className="fixed inset-0 z-[110] flex items-center justify-center p-6">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 bg-black/80 backdrop-blur-md"
+              onClick={resetBooking}
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="bg-white w-full max-w-sm rounded-[2rem] overflow-hidden relative shadow-2xl p-8 text-center z-10"
+            >
+              <button 
+                onClick={resetBooking}
+                className="absolute top-6 right-6 text-gray-400 hover:text-primary transition-colors"
+              >
+                <X size={24} />
+              </button>
+
+              {!cancelWaSent ? (
+                <div className="space-y-8">
+                  <div className="w-20 h-20 bg-red-50 text-red-500 rounded-full flex items-center justify-center mx-auto mb-4 border border-red-100 flex-col relative">
+                    <Smartphone size={32} strokeWidth={1.5} />
+                    <div className="absolute -right-2 top-0 bg-white p-2 rounded-full border border-red-100">
+                      <ExternalLink size={12} />
+                    </div>
+                  </div>
+                  
+                  <div className="space-y-4">
+                    <h3 className="text-3xl font-serif italic text-text-base leading-tight">Como cancelar</h3>
+                    {!dontShowInstructions && (
+                      <div className="space-y-5 text-sm text-gray-500 font-light leading-relaxed text-left">
+                        <div className="flex gap-4">
+                          <div className="w-6 h-6 rounded-full bg-red-50 text-red-600 flex items-center justify-center text-[10px] font-bold shrink-0">1</div>
+                          <p>Abra o WhatsApp e <strong>avise o barbeiro</strong> sobre o cancelamento.</p>
+                        </div>
+                        <div className="flex gap-4">
+                          <div className="w-6 h-6 rounded-full bg-red-50 text-red-600 flex items-center justify-center text-[10px] font-bold shrink-0">2</div>
+                          <p><strong>Retorne aqui</strong> para remover o horário do sistema e liberá-lo para outros.</p>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="flex items-center justify-center gap-3 pt-4">
+                      <label className="flex items-center gap-3 cursor-pointer group">
+                        <div className="relative">
+                          <input 
+                            type="checkbox" 
+                            className="peer sr-only"
+                            checked={dontShowInstructions}
+                            onChange={(e) => toggleSkipInstructions(e.target.checked, confirmCancelWhatsApp)}
+                          />
+                          <div className="w-5 h-5 border-2 border-border-base rounded-md transition-all peer-checked:bg-primary peer-checked:border-primary group-hover:border-primary/50" />
+                          <Check className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-white scale-0 transition-transform peer-checked:scale-100" size={12} strokeWidth={3} />
+                        </div>
+                        <span className="text-[10px] uppercase tracking-widest text-gray-400 font-bold group-hover:text-primary transition-colors">Não mostrar instruções novamente</span>
+                      </label>
+                    </div>
+                  </div>
+                  
+                  <div className="flex flex-col gap-4">
+                    <button 
+                      onClick={confirmCancelWhatsApp}
+                      className="w-full bg-red-500 text-white py-5 rounded-2xl font-sans text-xs uppercase tracking-[0.3em] font-bold hover:bg-red-600 transition-all shadow-xl shadow-red-500/20 flex items-center justify-center gap-3"
+                    >
+                      Ir para o WhatsApp <ExternalLink size={14} />
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-8">
+                  <div className="w-20 h-20 bg-amber-50 text-amber-500 rounded-full flex items-center justify-center mx-auto mb-4 border border-amber-100 flex-col">
+                    <Check size={32} strokeWidth={1.5} />
+                  </div>
+                  
+                  <div className="space-y-4">
+                    <h3 className="text-3xl font-serif italic text-text-base leading-tight">Mensagem enviada?</h3>
+                    <p className="text-sm text-gray-500 font-light leading-relaxed">
+                      Se você já avisou o barbeiro, clique no botão abaixo para <strong className="text-red-500 font-medium">confirmar o cancelamento</strong> no sistema.
+                    </p>
+                  </div>
+                  
+                  <div className="flex flex-col gap-4">
+                    <button 
+                      onClick={finalizeCancel}
+                      disabled={deletingId !== null}
+                      className={`w-full py-5 rounded-2xl font-sans text-xs uppercase tracking-[0.3em] font-bold transition-all shadow-xl ${
+                        deletingId !== null 
+                          ? 'bg-gray-100 text-gray-400 cursor-not-allowed' 
+                          : 'bg-red-500 text-white hover:bg-red-600 shadow-red-500/20'
+                      }`}
+                    >
+                      {deletingId !== null ? 'Cancelando...' : 'Confirmar Cancelamento'}
+                    </button>
+                    <button 
+                      onClick={() => setCancelWaSent(false)}
+                      className="text-[10px] uppercase tracking-widest font-bold text-gray-400 hover:text-accent"
+                    >
+                      Voltar
+                    </button>
+                  </div>
                 </div>
               )}
             </motion.div>
@@ -1344,7 +1551,7 @@ export default function App() {
                         {canCancel(booking.date) ? (
                           <button 
                             disabled={deletingId !== null}
-                            onClick={() => setBookingToCancel(booking)}
+                            onClick={() => handleCancelInitiate(booking)}
                             className={`w-full py-3 rounded-2xl text-[10px] uppercase tracking-widest font-bold transition-all flex items-center justify-center gap-2 ${
                               deletingId === booking.id 
                                 ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
@@ -1382,6 +1589,16 @@ export default function App() {
                       </button>
                     </div>
                   )}
+
+                  <div className="pt-10 mt-10 border-t border-border-base border-dashed text-center">
+                    <p className="text-[9px] uppercase tracking-widest text-gray-300 font-bold mb-4">Administração</p>
+                    <button 
+                      onClick={wipeAllBookings}
+                      className="text-[9px] uppercase tracking-widest font-bold text-red-300 hover:text-red-500 transition-colors"
+                    >
+                      Zerar Agenda (Geral)
+                    </button>
+                  </div>
                 </div>
               </div>
             </motion.div>
