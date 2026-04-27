@@ -1,0 +1,28 @@
+@import url('https://fonts.googleapis.com/css2?family=Crimson+Pro:italic,wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-serif: "Crimson Pro", serif;
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  
+  --color-primary: #5A5A40;
+  --color-accent: #8C7B60;
+  --color-bg-base: #F9F7F2;
+  --color-text-base: #3D3A35;
+  --color-border-base: #E8E4D9;
+  
+  --radius-xl: 1.5rem;
+  --radius-2xl: 2rem;
+}
+
+@layer base {
+  body {
+    @apply bg-bg-base text-text-base font-sans antialiased selection:bg-primary/20 selection:text-primary;
+  }
+}
+
+@layer utilities {
+  .card-nature {
+    @apply bg-white border border-border-base rounded-sm shadow-[0_4px_20px_rgba(0,0,0,0.02)];
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "entities": {
+    "Booking": {
+      "title": "Booking",
+      "description": "A scheduled appointment at the barber shop",
+      "type": "object",
+      "properties": {
+        "serviceName": { "type": "string" },
+        "price": { "type": "string" },
+        "day": { "type": "string" },
+        "time": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "userId": { "type": "string" }
+      },
+      "required": ["serviceName", "price", "day", "time", "createdAt"]
+    }
+  },
+  "firestore": {
+    "bookings": {
+      "schema": "Booking",
+      "description": "Collection of all client appointments"
+    }
+  }
+}
