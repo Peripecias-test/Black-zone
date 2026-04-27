@@ -14,6 +14,7 @@ import {
   Calendar, 
   Clock, 
   ExternalLink,
+  Smartphone,
   ChevronRight,
   Menu,
   X,
@@ -29,7 +30,13 @@ import {
   onSnapshot, 
   setDoc, 
   doc, 
-  serverTimestamp 
+  deleteDoc,
+  getDocs,
+  query,
+  where,
+  serverTimestamp,
+  updateDoc,
+  getDocFromServer
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 
@@ -62,22 +69,55 @@ const SERVICES = [
 const TIMES = ["09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00", "18:00", "19:00", "20:00"];
 
 export default function App() {
+  // Mapping and State
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [scrolled, setScrolled] = useState(false);
   
   // Booking State
   const [isBookingModalOpen, setIsBookingModalOpen] = useState(false);
+  const [isMyBookingsModalOpen, setIsMyBookingsModalOpen] = useState(false);
   const [isMapModalOpen, setIsMapModalOpen] = useState(false);
   const [step, setStep] = useState(1); // 1: Service Selection, 2: Date Selection, 3: Time Selection, 4: Confirmation
   const [selectedService, setSelectedService] = useState<{name: string, price: string} | null>(null);
   const [selectedDate, setSelectedDate] = useState<Date | null>(null);
   const [selectedTime, setSelectedTime] = useState<string | null>(null);
+  const [userIP, setUserIP] = useState<string>('');
+  const [waAction, setWaAction] = useState<{ title: string, message: string, url: string } | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [bookingToCancel, setBookingToCancel] = useState<any | null>(null);
+  const [errorModal, setErrorModal] = useState<{ title: string, message: string } | null>(null);
+  
+  const [isBooking, setIsBooking] = useState(false);
+  const [waSent, setWaSent] = useState(false);
+  const [showWaInstruction, setShowWaInstruction] = useState(false);
+  const [currentBookingId, setCurrentBookingId] = useState<string | null>(null);
   
   // New State for persistence
   const [bookings, setBookings] = useState<{date: string, time: string}[]>([]);
+  const [userBookingIds, setUserBookingIds] = useState<string[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem('legado_booking_ids') || '[]');
+    } catch {
+      return [];
+    }
+  });
+  const [myBookingsDetails, setMyBookingsDetails] = useState<any[]>([]);
 
   // Helpers for Calendar
   const formatDate = (date: Date) => date.toISOString().split('T')[0];
+  
+  const canCancel = (dateStr: string) => {
+    const [year, month, day] = dateStr.split('-').map(Number);
+    const appointmentDate = new Date(year, month - 1, day);
+    appointmentDate.setHours(0, 0, 0, 0);
+    
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setHours(0, 0, 0, 0);
+    
+    // Can cancel until the day before the appointment
+    return tomorrow <= appointmentDate;
+  };
   
   const getNext90Days = () => {
     const days = [];
@@ -127,33 +167,93 @@ export default function App() {
   useEffect(() => {
     const handleScroll = () => setScrolled(window.scrollY > 50);
     window.addEventListener('scroll', handleScroll);
-    
-    // Real-time listener for bookings
+    return () => window.removeEventListener('scroll', handleScroll);
+  }, []);
+
+  // Detect when user returns from WhatsApp
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && waSent && !isBooking) {
+        // Optional: you could trigger something here like a vibrate or a pulse on the confirm button
+        console.log("Usuário voltou do WhatsApp.");
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [waSent, isBooking]);
+
+  useEffect(() => {
+    // Fetch IP
+    fetch('https://api.ipify.org?format=json')
+      .then(res => res.json())
+      .then(data => setUserIP(data.ip))
+      .catch(() => setUserIP('Identificação do Sistema'));
+  }, []);
+
+  useEffect(() => {
+    // Real-time listener for ALL bookings (to show filled slots)
     const unsubscribe = onSnapshot(collection(db, 'bookings'), (snapshot) => {
-      const bookingsData = snapshot.docs.map(doc => ({
-        date: doc.data().date,
-        time: doc.data().time
-      }));
+      const bookingsData = snapshot.docs.map(doc => {
+        const data = doc.data();
+        return {
+          date: data.date,
+          time: data.time,
+          status: data.status || 'confirmado',
+          createdAt: data.createdAt?.toDate() || new Date()
+        };
+      });
       setBookings(bookingsData);
     }, (error) => {
       console.error("Erro ao carregar agendamentos do Firestore:", error);
     });
 
-    return () => {
-      window.removeEventListener('scroll', handleScroll);
-      unsubscribe();
-    };
+    return () => unsubscribe();
   }, []);
+
+  useEffect(() => {
+    const fetchMyDetails = async () => {
+      if (userBookingIds.length === 0) {
+        setMyBookingsDetails([]);
+        return;
+      }
+      
+      try {
+        const q = query(collection(db, 'bookings'), where('__name__', 'in', userBookingIds.slice(0, 10)));
+        const querySnapshot = await getDocs(q);
+        const details = querySnapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data()
+        }));
+        setMyBookingsDetails(details);
+      } catch (error) {
+        console.error("Erro ao buscar detalhes do agendamento:", error);
+      }
+    };
+
+    if (isMyBookingsModalOpen) {
+      fetchMyDetails();
+    }
+  }, [userBookingIds, isMyBookingsModalOpen]);
 
   const navLinks = [
     { name: 'Início', href: '#home' },
     { name: 'Serviços', href: '#services' },
+    { name: 'Meus Agendamentos', onClick: () => setIsMyBookingsModalOpen(true) },
     { name: 'Quem Somos', href: '#about' },
     { name: 'Localização', onClick: () => setIsMapModalOpen(true) },
   ];
 
   const isTimeOccupied = (dateStr: string, time: string) => {
-    return bookings.some(b => b.date === dateStr && b.time === time);
+    return bookings.some(b => {
+      if (b.date !== dateStr || b.time !== time) return false;
+      
+      // If confirmed, it's occupied
+      if (b.status === 'confirmado') return true;
+      
+      // If pending, it's occupied only if created in the last 15 minutes
+      const fifteenMinutesAgo = new Date(Date.now() - 15 * 60 * 1000);
+      return b.status === 'pendente' && b.createdAt > fifteenMinutesAgo;
+    });
   };
 
   const isDayFull = (date: Date) => {
@@ -168,6 +268,10 @@ export default function App() {
     setSelectedService(null);
     setSelectedDate(null);
     setSelectedTime(null);
+    setWaSent(false);
+    setShowWaInstruction(false);
+    setIsBooking(false);
+    setCurrentBookingId(null);
   };
 
   const handleBookingStart = (service: {name: string, price: string}) => {
@@ -176,61 +280,151 @@ export default function App() {
     setIsBookingModalOpen(true);
   };
 
-  const confirmBooking = async () => {
-    if (!selectedService || !selectedDate || !selectedTime) {
-      alert("Por favor, selecione todos os campos antes de finalizar.");
+  const initiateWhatsApp = async () => {
+    if (!selectedService || !selectedDate || !selectedTime || isBooking) {
+      alert("Por favor, selecione todos os campos.");
       return;
     }
-    
+
+    setIsBooking(true);
     const dateStr = formatDate(selectedDate);
-    const readableDate = selectedDate.toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' });
+    const bookingId = `${dateStr}_${selectedTime.replace(':', '')}`;
     
     try {
-      // Create a unique ID for the slot to prevent duplicates (blocking)
-      const bookingId = `${dateStr}_${selectedTime.replace(':', '')}`;
+      // Check if slot is truly free
+      const docRef = doc(db, 'bookings', bookingId);
+      const docSnap = await getDocFromServer(docRef);
       
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        // If it's already confirmed, or it's a recent pending from someone else
+        if (data.status === 'confirmado') {
+           alert("Este horário já foi preenchido. Por favor, escolha outro.");
+           resetBooking();
+           return;
+        }
+      }
+
+      // Reserve slot as PENDING
       const bookingData = {
         serviceName: selectedService.name,
         price: selectedService.price,
         date: dateStr,
         time: selectedTime,
+        userIP: userIP || 'Gravado via App',
+        status: 'pendente',
         createdAt: serverTimestamp()
       };
 
-      await setDoc(doc(db, 'bookings', bookingId), bookingData);
+      await setDoc(docRef, bookingData);
+      setCurrentBookingId(bookingId);
 
-      // Formatting message for WhatsApp
-      // Using plain labels to avoid encoding issues with complex emojis in some environments
+      // WhatsApp Message
+      const readableDate = selectedDate.toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' });
       const message = [
-        "Olá, gostaria de confirmar o agendamento:",
+        "✂️ *SOLICITAÇÃO DE AGENDAMENTO*",
         "",
-        `DATA: ${readableDate}`,
-        `HORA: ${String(selectedTime)}`,
-        `SERVICO: ${String(selectedService.name)}`,
-        `VALOR: ${String(selectedService.price)}`,
+        `📅 DATA: ${readableDate}`,
+        `⏰ HORA: ${String(selectedTime)}`,
+        `👤 SERVIÇO: ${String(selectedService.name)}`,
+        `💰 VALOR: ${String(selectedService.price)}`,
         "",
-        "Obrigado!"
+        `📍 IP: ${userIP || 'Gravado'}`,
+        "",
+        "Estou enviando esta mensagem para confirmar meu interesse no horário. Por favor, reserve para mim!"
       ].join("\n");
 
       const whatsappUrl = `https://wa.me/5511995202058?text=${encodeURIComponent(message)}`;
       
-      // Try to open WhatsApp
-      const win = window.open(whatsappUrl, '_blank');
-      if (!win) {
-         // Fallback if blocked
-         window.location.href = whatsappUrl;
-      }
+      // Open WhatsApp
+      window.open(whatsappUrl, '_blank') || (window.location.href = whatsappUrl);
       
-      // Reset
+      // Switch to confirmation step in UI
+      setWaSent(true);
+    } catch (error) {
+      console.error("Erro ao iniciar reserva:", error);
+      alert("Erro ao conectar com o servidor. Tente novamente.");
+    } finally {
+      setIsBooking(false);
+    }
+  };
+
+  const finalizeBooking = async () => {
+    if (!currentBookingId || isBooking) return;
+    
+    setIsBooking(true);
+    
+    try {
+      const docRef = doc(db, 'bookings', currentBookingId);
+      
+      // Update status to confirmed
+      await updateDoc(docRef, {
+        status: 'confirmado',
+        confirmedAt: serverTimestamp()
+      });
+
+      // Save to local storage for "My Bookings"
+      const newIds = [...userBookingIds, currentBookingId];
+      setUserBookingIds(newIds);
+      localStorage.setItem('legado_booking_ids', JSON.stringify(newIds));
+
+      // Success
       resetBooking();
+      setWaAction({
+        title: "Agendamento Confirmado!",
+        message: "Seu horário foi marcado com sucesso no sistema e sua vaga está garantida. Nos vemos em breve!",
+        url: "" 
+      });
 
     } catch (error: any) {
-      if (error.code === 'permission-denied') {
-        alert("Ops! Parece que este horário acabou de ser preenchido por outra pessoa ou houve um erro de validação. Por favor, escolha outro horário.");
-      } else {
-        console.error("Erro ao realizar agendamento:", error);
-        alert("Ocorreu um erro ao salvar seu agendamento. Verifique sua conexão e tente novamente.");
-      }
+      console.error("Erro ao finalizar agendamento:", error);
+      alert("Erro ao validar sua reserva. Mas não se preocupe, se você enviou a mensagem, o barbeiro já recebeu seus dados!");
+      resetBooking();
+    } finally {
+      setIsBooking(false);
+    }
+  };
+
+  const cancelBooking = async (booking: any) => {
+    if (!canCancel(booking.date)) {
+      setErrorModal({
+        title: "Prazo Excedido",
+        message: "Operação bloqueada: Cancelamentos só podem ser realizados com no mínimo 24h de antecedência."
+      });
+      return;
+    }
+
+    setDeletingId(booking.id);
+    try {
+      await deleteDoc(doc(db, 'bookings', booking.id));
+      const newIds = userBookingIds.filter(bid => bid !== booking.id);
+      setUserBookingIds(newIds);
+      localStorage.setItem('legado_booking_ids', JSON.stringify(newIds));
+      
+      // Update details state
+      setMyBookingsDetails(prev => prev.filter(b => b.id !== booking.id));
+      
+      const readableDate = booking.date.split('-').reverse().join('/');
+      const message = `Olá, gostaria de cancelar o agendamento para o dia ${readableDate} às ${booking.time}, de acordo com o meu número do WhatsApp ou ip gravado [${booking.userIP || 'gravado no sistema'}].`;
+
+      const whatsappUrl = `https://wa.me/5511995202058?text=${encodeURIComponent(message)}`;
+      
+      // Show success modal for cancellation
+      setWaAction({
+        title: "Cancelamento Processado",
+        message: "O horário foi liberado no sistema. Por favor, clique abaixo para comunicar o cancelamento ao barbeiro via WhatsApp.",
+        url: whatsappUrl
+      });
+      
+      setBookingToCancel(null);
+    } catch (error) {
+      console.error("Erro ao cancelar:", error);
+      setErrorModal({
+        title: "Erro no Sistema",
+        message: "Ocorreu um erro ao tentar cancelar. Verifique sua conexão ou tente novamente mais tarde."
+      });
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -298,81 +492,245 @@ export default function App() {
       {/* Mobile Menu Overlay */}
       <AnimatePresence>
         {isMenuOpen && (
-          <motion.div 
-            initial={{ opacity: 0, y: -20 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -20 }}
-            className="fixed inset-0 z-50 bg-bg-base flex flex-col items-center justify-center gap-10 md:hidden"
-          >
-            <button className="absolute top-8 right-8 text-text-base" onClick={() => setIsMenuOpen(false)}>
-              <X size={32} />
-            </button>
-            <div className="flex flex-col items-center gap-8">
-              {navLinks.map((link) => (
-                <a 
-                  key={link.name} 
-                  href={link.href} 
-                  onClick={(e) => {
-                    if (link.onClick) {
-                      e.preventDefault();
-                      link.onClick();
-                    }
-                    setIsMenuOpen(false);
-                  }}
-                  className="text-4xl font-serif italic text-accent hover:text-primary transition-colors cursor-pointer"
-                >
-                  {link.name}
-                </a>
-              ))}
-            </div>
-            <button 
-              onClick={() => { setStep(1); setIsBookingModalOpen(true); setIsMenuOpen(false); }}
-              className="bg-primary text-white px-12 py-4 rounded-sm font-sans text-sm uppercase tracking-[0.2em] font-bold"
+          <div className="fixed inset-0 z-[100] flex justify-end">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsMenuOpen(false)}
+              className="absolute inset-0 bg-text-base/20 backdrop-blur-sm"
+            />
+            
+            <motion.div
+              initial={{ x: '100%' }}
+              animate={{ x: 0 }}
+              exit={{ x: '100%' }}
+              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+              className="bg-white w-[80%] max-w-[300px] h-full relative shadow-2xl flex flex-col p-8 pt-24"
             >
-              Agendar Horário
-            </button>
-          </motion.div>
+              <button 
+                onClick={() => setIsMenuOpen(false)}
+                className="absolute top-8 right-8 text-primary hover:rotate-90 transition-transform duration-300"
+              >
+                <X size={28} />
+              </button>
+              
+              <div className="space-y-2 mb-12">
+                <div className="w-8 h-0.5 bg-primary" />
+                <p className="text-[10px] uppercase tracking-[0.3em] font-bold text-accent">Menu</p>
+              </div>
+
+              <div className="flex flex-col space-y-6">
+                {navLinks.map((link) => (
+                  <a
+                    key={link.name}
+                    href={link.href}
+                    onClick={(e) => {
+                      if (link.onClick) {
+                        e.preventDefault();
+                        link.onClick();
+                      }
+                      setIsMenuOpen(false);
+                    }}
+                    className="text-2xl font-serif italic text-text-base hover:text-primary transition-all hover:pl-2"
+                  >
+                    {link.name}
+                  </a>
+                ))}
+              </div>
+
+              <div className="mt-auto space-y-6">
+                <button 
+                  onClick={() => { setIsMenuOpen(false); setIsBookingModalOpen(true); }}
+                  className="w-full bg-primary text-white py-5 rounded-xl font-sans text-[10px] uppercase tracking-widest font-bold shadow-xl shadow-primary/20"
+                >
+                  Agende sua visita
+                </button>
+                
+                <div className="text-center pt-8 border-t border-border-base/50">
+                  <p className="text-[9px] uppercase tracking-widest text-accent font-medium leading-relaxed">
+                    Legado da tradição em cada detalhe.
+                  </p>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Error Modal */}
+      <AnimatePresence>
+        {errorModal && (
+          <div className="fixed inset-0 z-[300] flex items-center justify-center p-6 text-center">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 bg-text-base/90 backdrop-blur-md"
+              onClick={() => setErrorModal(null)}
+            />
+            
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="bg-white w-full max-w-sm rounded-[40px] p-10 relative z-10 border border-border-base shadow-2xl flex flex-col items-center"
+            >
+              <div className="w-20 h-20 bg-amber-50 text-amber-500 rounded-full flex items-center justify-center mb-6">
+                <X size={40} />
+              </div>
+              
+              <h3 className="text-3xl font-serif italic mb-4">{errorModal.title}</h3>
+              <p className="text-sm text-gray-500 font-light leading-relaxed mb-8">
+                {errorModal.message}
+              </p>
+              
+              <button 
+                onClick={() => setErrorModal(null)}
+                className="w-full bg-text-base text-white py-5 rounded-2xl font-sans text-[10px] uppercase tracking-[0.2em] font-bold shadow-xl hover:bg-black transition-all"
+              >
+                Compreendi
+              </button>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Confirmation Modal for Cancellation */}
+      <AnimatePresence>
+        {bookingToCancel && (
+          <div className="fixed inset-0 z-[250] flex items-center justify-center p-6 text-center">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 bg-text-base/90 backdrop-blur-md"
+              onClick={() => setBookingToCancel(null)}
+            />
+            
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="bg-white w-full max-w-sm rounded-[40px] p-10 relative z-10 border border-border-base shadow-2xl flex flex-col items-center"
+            >
+              <div className="w-20 h-20 bg-red-50 text-red-500 rounded-full flex items-center justify-center mb-6">
+                <Scissors size={40} className="rotate-90" />
+              </div>
+              
+              <h3 className="text-3xl font-serif italic mb-4">Confirmar Cancelamento?</h3>
+              <div className="text-sm text-gray-500 font-light leading-relaxed mb-8 flex flex-col items-center gap-1">
+                <span>Deseja cancelar o agendamento de:</span>
+                <span className="font-bold text-text-base">{bookingToCancel.serviceName}</span>
+                <span className="text-primary font-medium">{bookingToCancel.date.split('-').reverse().join('/')} às {bookingToCancel.time}</span>
+              </div>
+              
+              <div className="space-y-4 w-full">
+                <button 
+                  onClick={() => cancelBooking(bookingToCancel)}
+                  className="block w-full bg-red-500 text-white py-5 rounded-2xl font-sans text-[10px] uppercase tracking-[0.2em] font-bold shadow-xl shadow-red-500/20 hover:bg-red-600 transition-all"
+                >
+                  Confirmar e Cancelar
+                </button>
+                <button 
+                  onClick={() => setBookingToCancel(null)}
+                  className="text-[9px] uppercase tracking-widest font-bold text-accent hover:text-primary transition-colors"
+                >
+                  Manter Agendamento
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* WhatsApp Action Success Modal */}
+      <AnimatePresence>
+        {waAction && (
+          <div className="fixed inset-0 z-[200] flex items-center justify-center p-6 text-center">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 bg-text-base/80 backdrop-blur-xl"
+              onClick={() => setWaAction(null)}
+            />
+            
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="bg-white w-full max-w-sm rounded-[40px] p-10 relative z-10 border border-border-base shadow-2xl flex flex-col items-center"
+            >
+              <div className="w-20 h-20 bg-primary/5 text-primary rounded-full flex items-center justify-center mb-6">
+                <Check size={40} />
+              </div>
+              
+              <h3 className="text-3xl font-serif italic mb-4">{waAction.title}</h3>
+              <p className="text-sm text-gray-500 font-light leading-relaxed mb-8">
+                {waAction.message}
+              </p>
+              
+              <div className="space-y-4 w-full">
+                <a 
+                  href={waAction.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={() => setWaAction(null)}
+                  className="block w-full bg-primary text-white py-5 rounded-2xl font-sans text-[10px] uppercase tracking-[0.2em] font-bold shadow-xl shadow-primary/20 hover:bg-primary/95 transition-all"
+                >
+                  Abrir WhatsApp
+                </a>
+                <button 
+                  onClick={() => setWaAction(null)}
+                  className="text-[9px] uppercase tracking-widest font-bold text-accent hover:text-primary transition-colors"
+                >
+                  Fechar janela
+                </button>
+              </div>
+            </motion.div>
+          </div>
         )}
       </AnimatePresence>
 
       {/* Hero Section */}
-      <section id="home" className="relative h-[85vh] flex items-center justify-center overflow-hidden bg-bg-base border-b border-border-base">
-        <div className="container mx-auto px-6 grid md:grid-cols-2 gap-12 items-center h-full">
+      <section id="home" className="relative min-h-[85vh] flex items-center justify-center overflow-hidden bg-bg-base border-b border-border-base pt-10 md:pt-0">
+        <div className="container mx-auto px-6 grid md:grid-cols-2 gap-12 items-center h-full py-12 md:py-0">
           <motion.div
             initial={{ opacity: 0, x: -30 }}
             whileInView={{ opacity: 1, x: 0 }}
             viewport={{ once: true }}
             transition={{ duration: 1 }}
-            className="space-y-8"
+            className="space-y-8 text-center md:text-left z-10"
           >
             <div className="space-y-4">
               <span className="text-accent font-bold tracking-[0.4em] uppercase text-[10px]">Excelência em Imagem</span>
-              <h2 className="text-6xl md:text-8xl font-serif font-medium leading-[1.05] tracking-tight text-text-base">
+              <h2 className="text-5xl sm:text-6xl md:text-8xl font-serif font-medium leading-[1.05] tracking-tight text-text-base">
                 O seu estilo <br />é a sua <span className="italic text-accent underline decoration-border-base decoration-offset-8">história</span>.
               </h2>
-              <p className="font-sans text-lg text-gray-500 max-w-md leading-relaxed font-light">
+              <p className="font-sans text-base md:text-lg text-gray-500 max-w-md mx-auto md:mx-0 leading-relaxed font-light">
                 Resgatando a tradição da barbearia clássica com um toque de modernidade. Um espaço dedicado ao homem de bom gosto.
               </p>
             </div>
             
-            <div className="flex flex-col sm:flex-row gap-6 pt-4">
+            <div className="flex flex-col sm:flex-row gap-6 pt-4 items-center md:items-start justify-center md:justify-start">
               <button 
                 onClick={() => { setStep(1); setIsBookingModalOpen(true); }}
-                className="bg-primary text-white px-10 py-5 font-sans text-sm uppercase tracking-widest hover:bg-primary/95 transition-all rounded-sm flex items-center justify-center gap-3 shadow-2xl shadow-primary/20"
+                className="w-full sm:w-auto bg-primary text-white px-10 py-5 font-sans text-sm uppercase tracking-widest hover:bg-primary/95 transition-all rounded-sm flex items-center justify-center gap-3 shadow-2xl shadow-primary/20"
               >
                 <Calendar size={18} /> Agendar Agora
               </button>
               <div className="flex items-center gap-4 px-2">
                 <div className="w-12 h-12 rounded-full border border-border-base flex items-center justify-center italic text-lg font-serif">BZ</div>
-                <p className="font-sans text-[10px] uppercase tracking-widest text-accent font-bold leading-tight">
+                <p className="font-sans text-[10px] uppercase tracking-widest text-accent font-bold leading-tight text-left">
                   Tradição em <br />cada movimento
                 </p>
               </div>
             </div>
           </motion.div>
 
-          <div className="hidden md:block relative h-full">
-            <div className="absolute inset-y-12 right-0 w-full bg-white rounded-l-[200px] shadow-sm border border-border-base overflow-hidden">
+          <div className="relative h-[400px] md:h-full block">
+            <div className="absolute inset-y-0 md:inset-y-12 right-0 md:right-0 w-full md:w-full bg-white rounded-[40px] md:rounded-l-[200px] shadow-sm border border-border-base overflow-hidden">
                <img 
                 src="https://images.unsplash.com/photo-1503951914875-452162b0f3f1?q=80&w=2070&auto=format&fit=crop" 
                 alt="Barber Shop Interior" 
@@ -422,13 +780,13 @@ export default function App() {
       </section>
 
       {/* About Section */}
-      <section id="about" className="py-32 bg-bg-base border-y border-border-base">
+      <section id="about" className="py-24 md:py-32 bg-bg-base border-y border-border-base">
         <div className="container mx-auto px-6">
-          <div className="grid md:grid-cols-2 gap-20 items-center">
-            <div className="space-y-10">
+          <div className="grid md:grid-cols-2 gap-16 md:gap-20 items-center">
+            <div className="space-y-8 md:space-y-10 text-center md:text-left">
               <span className="text-accent font-bold tracking-[0.3em] uppercase text-[10px]">Nossa História</span>
-              <h2 className="text-5xl md:text-6xl font-serif font-medium leading-tight text-text-base">Quem Somos</h2>
-              <div className="space-y-6 text-gray-500 font-light leading-relaxed text-lg">
+              <h2 className="text-4xl md:text-6xl font-serif font-medium leading-tight text-text-base">Quem Somos</h2>
+              <div className="space-y-6 text-gray-500 font-light leading-relaxed text-base md:text-lg">
                 <p>
                   A Barbearia Black Zone nasceu com o desejo de proporcionar uma <strong className="text-primary font-medium italic underline decoration-border-base decoration-4 decoration-offset-4">experiência única de atendimento</strong> a um preço justo.
                 </p>
@@ -439,16 +797,16 @@ export default function App() {
               </div>
             </div>
             
-            <div className="relative p-10 bg-white border border-border-base rounded-[40px] shadow-sm">
-               <div className="absolute top-0 right-0 w-32 h-32 bg-bg-base rounded-bl-full -mr-10 -mt-10 opacity-50"></div>
+            <div className="relative p-6 md:p-10 bg-white border border-border-base rounded-[40px] shadow-sm">
+               <div className="absolute top-0 right-0 w-32 h-32 bg-bg-base rounded-bl-full -mr-6 -mt-6 md:-mr-10 md:-mt-10 opacity-50"></div>
                <img 
                 src="https://images.unsplash.com/photo-1599351431202-1e0f0137899a?q=80&w=800&auto=format&fit=crop" 
-                className="grayscale rounded-3xl border border-border-base relative z-10" 
+                className="grayscale rounded-3xl border border-border-base relative z-10 w-full" 
                 alt="Barber"
                />
-               <div className="absolute -bottom-6 -left-6 bg-primary text-white p-6 rounded-2xl z-20 shadow-xl max-w-[200px]">
+               <div className="absolute -bottom-4 -left-4 md:-bottom-6 md:-left-6 bg-primary text-white p-4 md:p-6 rounded-2xl z-20 shadow-xl max-w-[160px] md:max-w-[200px]">
                  <Star className="mb-2 fill-white text-white" />
-                 <p className="font-bold text-sm uppercase tracking-widest leading-tight">Excelência Certificada</p>
+                 <p className="font-bold text-xs md:text-sm uppercase tracking-widest leading-tight">Excelência Certificada</p>
                </div>
             </div>
           </div>
@@ -545,87 +903,6 @@ export default function App() {
       </footer>
 
       {/* Location Map Modal */}
-      <AnimatePresence>
-        {isMapModalOpen && (
-          <motion.div 
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-6"
-          >
-            <div className="absolute inset-0 bg-text-base/90 backdrop-blur-md" onClick={() => setIsMapModalOpen(false)} />
-            
-            <motion.div 
-              initial={{ scale: 0.95, opacity: 0, y: 20 }}
-              animate={{ scale: 1, opacity: 1, y: 0 }}
-              exit={{ scale: 0.95, opacity: 0, y: 20 }}
-              className="relative w-full max-w-5xl bg-bg-base overflow-hidden rounded-3xl shadow-2xl flex flex-col md:flex-row min-h-[500px]"
-            >
-              {/* Map Info */}
-              <div className="w-full md:w-1/3 p-10 bg-white flex flex-col justify-between border-r border-border-base">
-                <div className="space-y-8">
-                  <div className="space-y-4">
-                    <button 
-                      onClick={() => setIsMapModalOpen(false)}
-                      className="text-[10px] uppercase font-bold text-accent flex items-center gap-2 hover:text-primary transition-colors mb-6"
-                    >
-                      <ChevronRight size={12} className="rotate-180" /> fechar janelar
-                    </button>
-                    <h3 className="text-4xl font-serif italic leading-tight">Nossa Unidade Consolação</h3>
-                    <div className="w-12 h-1 bg-primary" />
-                  </div>
-
-                  <div className="space-y-6">
-                    <div className="flex gap-4">
-                      <div className="w-10 h-10 bg-primary/5 rounded-full flex items-center justify-center text-primary flex-shrink-0 border border-primary/10">
-                        <MapPin size={18} />
-                      </div>
-                      <div>
-                        <p className="text-[10px] uppercase font-bold text-accent tracking-widest mb-1">Endereço</p>
-                        <p className="text-sm font-medium text-text-base leading-relaxed">R. da Consolação, 1234 - Consolação, São Paulo - SP, 01302-001</p>
-                      </div>
-                    </div>
-
-                    <div className="flex gap-4">
-                      <div className="w-10 h-10 bg-primary/5 rounded-full flex items-center justify-center text-primary flex-shrink-0 border border-primary/10">
-                        <Clock size={18} />
-                      </div>
-                      <div>
-                        <p className="text-[10px] uppercase font-bold text-accent tracking-widest mb-1">Funcionamento</p>
-                        <p className="text-sm font-medium text-text-base">Seg a Sex: 09h - 20h</p>
-                        <p className="text-sm font-medium text-text-base">Sábados: 09h - 18h</p>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="pt-10">
-                  <a 
-                    href="https://www.google.com/maps/dir/?api=1&destination=R.+da+Consolação,+São+Paulo+-+SP" 
-                    target="_blank" 
-                    rel="noopener noreferrer"
-                    className="w-full py-5 bg-text-base text-white text-[10px] uppercase tracking-[0.2em] font-bold rounded-2xl flex items-center justify-center gap-3 hover:bg-primary transition-all shadow-xl group"
-                  >
-                    Como Chegar <ExternalLink size={14} className="group-hover:translate-x-1 group-hover:-translate-y-1 transition-transform" />
-                  </a>
-                </div>
-              </div>
-
-              {/* Map Embed */}
-              <div className="flex-1 bg-gray-100 relative h-[400px] md:h-auto">
-                <iframe 
-                  src="https://www.google.com/maps/embed?pb=!1m18!1m12!1m3!1d3657.487770003001!2d-46.6534563!3d-23.5513988!2m3!1f0!2f0!3f0!3m2!1i1024!2i768!4f13.1!3m3!1m2!1s0x94ce58334466b733%3A0xe54e60ac03405785!2zUi4gZGEgQ29uc29sYcOnw6NvIC0gU8OjbyBQYXVsbywgU1A!5e0!3m2!1spt-BR!2sbr!4v1714058400000!5m2!1spt-BR!2sbr" 
-                  className="absolute inset-0 w-full h-full grayscale-[0.5] contrast-[1.1] brightness-[0.9]"
-                  style={{ border: 0 }} 
-                  allowFullScreen 
-                  loading="lazy" 
-                  referrerPolicy="no-referrer-when-downgrade"
-                ></iframe>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
       <AnimatePresence>
         {isMapModalOpen && (
           <motion.div 
@@ -855,39 +1132,258 @@ export default function App() {
 
               {step === 4 && (
                 <div className="space-y-10 text-center py-6">
-                  <div className="w-24 h-24 bg-primary/5 text-primary rounded-full flex items-center justify-center mx-auto mb-4 border border-primary/10">
-                    <Check size={48} strokeWidth={1.5} />
-                  </div>
-                  <div className="space-y-4">
-                    <h3 className="text-4xl font-serif italic">Resumo do pedido</h3>
-                    <div className="max-w-xs mx-auto py-6 bg-white border-y border-dashed border-border-base space-y-3">
-                       <p className="text-xs uppercase tracking-widest text-accent font-bold leading-none">{selectedService?.name}</p>
-                       <p className="font-serif text-3xl text-primary leading-none">{selectedService?.price}</p>
-                       <div className="flex flex-col items-center gap-2 pt-2">
-                         <p className="text-[10px] uppercase tracking-widest border border-primary/20 inline-block px-4 py-1.5 rounded-full">
-                           {selectedDate?.toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' })}
-                         </p>
-                         <p className="text-[10px] uppercase tracking-widest bg-primary text-white inline-block px-4 py-1.5 rounded-full">{selectedTime}</p>
-                       </div>
-                    </div>
-                  </div>
-                  
-                  <div className="flex flex-col gap-4">
-                    <button 
-                      onClick={confirmBooking}
-                      className="w-full bg-primary text-white py-6 rounded-2xl font-sans text-xs uppercase tracking-[0.3em] font-bold hover:bg-primary/95 transition-all shadow-xl shadow-primary/20"
-                    >
-                      Finalizar no WhatsApp
-                    </button>
-                    <button 
-                      onClick={() => setStep(3)}
-                      className="text-[10px] uppercase tracking-widest font-bold text-gray-400 hover:text-accent"
-                    >
-                      Voltar e alterar horário
-                    </button>
-                  </div>
+                  {!waSent ? (
+                    <>
+                      {!showWaInstruction ? (
+                        <>
+                          <div className="w-24 h-24 bg-primary/5 text-primary rounded-full flex items-center justify-center mx-auto mb-4 border border-primary/10">
+                            <Calendar size={48} strokeWidth={1.5} />
+                          </div>
+                          <div className="space-y-4">
+                            <h3 className="text-4xl font-serif italic">Resumo do agendamento</h3>
+                            <div className="max-w-xs mx-auto py-6 bg-white border-y border-dashed border-border-base space-y-3">
+                               <p className="text-xs uppercase tracking-widest text-accent font-bold leading-none">{selectedService?.name}</p>
+                               <p className="font-serif text-3xl text-primary leading-none">{selectedService?.price}</p>
+                               <div className="flex flex-col items-center gap-2 pt-2">
+                                 <p className="text-[10px] uppercase tracking-widest border border-primary/20 inline-block px-4 py-1.5 rounded-full">
+                                   {selectedDate?.toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' })}
+                                 </p>
+                                 <p className="text-[10px] uppercase tracking-widest bg-primary text-white inline-block px-4 py-1.5 rounded-full">{selectedTime}</p>
+                               </div>
+                            </div>
+                          </div>
+                          
+                          <div className="flex flex-col gap-4">
+                            <button 
+                              onClick={() => setShowWaInstruction(true)}
+                              className="w-full bg-primary text-white py-6 rounded-2xl font-sans text-xs uppercase tracking-[0.3em] font-bold hover:bg-primary/95 transition-all shadow-xl shadow-primary/20"
+                            >
+                              Continuar para reserva
+                            </button>
+                            <button 
+                              onClick={() => setStep(3)}
+                              className="text-[10px] uppercase tracking-widest font-bold text-gray-400 hover:text-accent"
+                            >
+                              Voltar e alterar horário
+                            </button>
+                          </div>
+                        </>
+                      ) : (
+                        <motion.div 
+                          initial={{ opacity: 0, scale: 0.95 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          className="space-y-8"
+                        >
+                          <div className="w-24 h-24 bg-amber-50 text-amber-500 rounded-full flex items-center justify-center mx-auto mb-4 border border-amber-100 flex-col relative">
+                            <Smartphone size={40} strokeWidth={1.5} />
+                            <div className="absolute -right-2 top-0 bg-white p-2 rounded-full border border-amber-100 animate-bounce">
+                              <ExternalLink size={16} />
+                            </div>
+                          </div>
+                          <div className="space-y-4">
+                            <h3 className="text-3xl font-serif italic text-text-base leading-tight">Instrução importante</h3>
+                            <div className="space-y-6 text-sm text-gray-500 font-light leading-relaxed max-w-[280px] mx-auto text-left">
+                              <div className="flex gap-4">
+                                <div className="w-6 h-6 rounded-full bg-primary/10 text-primary flex items-center justify-center text-[10px] font-bold shrink-0">1</div>
+                                <p>Abra o WhatsApp e <strong>envie a mensagem</strong> automática que preparamos.</p>
+                              </div>
+                              <div className="flex gap-4">
+                                <div className="w-6 h-6 rounded-full bg-primary/10 text-primary flex items-center justify-center text-[10px] font-bold shrink-0">2</div>
+                                <p><strong>Retorne imediatamente</strong> a este site para confirmar sua reserva.</p>
+                              </div>
+                              <div className="flex gap-4">
+                                <div className="w-6 h-6 rounded-full bg-amber-50 text-amber-600 flex items-center justify-center text-[10px] font-bold shrink-0 italic">!</div>
+                                <p>A vaga só é garantida após você clicar em <strong>"Confirmar"</strong> aqui no site.</p>
+                              </div>
+                            </div>
+                          </div>
+                          
+                          <div className="flex flex-col gap-4 pt-4">
+                            <button 
+                              onClick={initiateWhatsApp}
+                              disabled={isBooking}
+                              className="w-full bg-primary text-white py-6 rounded-2xl font-sans text-xs uppercase tracking-[0.3em] font-bold hover:bg-primary/95 transition-all shadow-xl shadow-primary/20 flex items-center justify-center gap-3"
+                            >
+                              {isBooking ? 'Reservando...' : <>Ir para o WhatsApp <ExternalLink size={14} /></>}
+                            </button>
+                            <button 
+                              onClick={() => setShowWaInstruction(false)}
+                              className="text-[10px] uppercase tracking-widest font-bold text-gray-400 hover:text-accent"
+                            >
+                              Voltar para o resumo
+                            </button>
+                          </div>
+                        </motion.div>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <div className="w-24 h-24 bg-amber-50 text-amber-500 rounded-full flex items-center justify-center mx-auto mb-4 border border-amber-100 flex-col">
+                        <Phone size={32} strokeWidth={1.5} className="mb-1" />
+                        <Check size={16} className="-mt-2 ml-4 bg-white rounded-full p-0.5 border border-amber-100" />
+                      </div>
+                      <div className="space-y-4">
+                        <h3 className="text-3xl font-serif italic text-text-base leading-tight">Você enviou a mensagem?</h3>
+                        <p className="text-sm text-gray-500 font-light leading-relaxed max-w-[280px] mx-auto">
+                          Se você já enviou a mensagem para o barbeiro, clique no botão abaixo para <strong className="text-primary font-medium">garantir sua vaga</strong> no sistema.
+                        </p>
+                        <div className="bg-primary/5 p-4 rounded-2xl border border-primary/10 mt-6">
+                           <p className="text-[10px] uppercase tracking-widest font-bold text-primary mb-1">Horário Escolhido</p>
+                           <p className="text-sm font-serif italic">{selectedDate?.toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' })} às {selectedTime}</p>
+                        </div>
+                      </div>
+                      
+                      <div className="flex flex-col gap-4 pt-4">
+                        <button 
+                          onClick={finalizeBooking}
+                          disabled={isBooking}
+                          className={`w-full py-6 rounded-2xl font-sans text-xs uppercase tracking-[0.3em] font-bold transition-all shadow-xl ${
+                            isBooking 
+                              ? 'bg-gray-100 text-gray-400 cursor-not-allowed' 
+                              : 'bg-green-600 text-white hover:bg-green-700 shadow-green-600/20'
+                          }`}
+                        >
+                          {isBooking ? 'Reservando...' : 'Confirmar e Finalizar Agendamento'}
+                        </button>
+                        <button 
+                          onClick={() => setWaSent(false)}
+                          className="text-[10px] uppercase tracking-widest font-bold text-gray-400 hover:text-accent"
+                        >
+                          Reenviar mensagem no WhatsApp
+                        </button>
+                      </div>
+                    </>
+                  )}
                 </div>
               )}
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {isMyBookingsModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsMyBookingsModalOpen(false)}
+              className="absolute inset-0 bg-text-base/60 backdrop-blur-md"
+            />
+            
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="bg-bg-base w-full max-w-lg rounded-[40px] p-8 md:p-12 relative z-10 border border-border-base shadow-2xl overflow-y-auto max-h-[90vh] custom-scrollbar"
+            >
+              <div className="absolute top-0 right-0 w-32 h-32 bg-white rounded-bl-full -mr-10 -mt-10 opacity-50" />
+              
+              <button 
+                onClick={() => setIsMyBookingsModalOpen(false)}
+                className="absolute top-8 right-8 text-gray-400 hover:text-primary transition-colors z-20"
+              >
+                <X size={28} />
+              </button>
+
+              <div className="space-y-10 relative z-10">
+                <div className="space-y-3">
+                  <h3 className="text-4xl font-serif italic text-text-base">Meus Agendamentos</h3>
+                  <div className="w-12 h-1 bg-primary" />
+                  <p className="text-[10px] uppercase tracking-widest text-accent font-bold">
+                    {myBookingsDetails.length === 0 ? 'Nenhum agendamento encontrado' : `${myBookingsDetails.length} agendamento(s)`}
+                  </p>
+                </div>
+
+                <div className="space-y-6">
+                  {myBookingsDetails.map((booking) => (
+                    <div 
+                      key={booking.id}
+                      className="p-6 bg-white border border-border-base rounded-3xl space-y-4 hover:shadow-md transition-shadow group"
+                    >
+                      <div className="flex justify-between items-start">
+                        <div>
+                          <div className="flex items-center gap-2 mb-1">
+                            <p className="text-[10px] uppercase tracking-[0.2em] font-bold text-accent">{booking.serviceName}</p>
+                            {booking.status === 'pendente' && (
+                              <span className="bg-amber-50 text-amber-600 px-2 py-0.5 rounded-md text-[8px] font-bold uppercase tracking-widest border border-amber-100 flex items-center gap-1">
+                                <Clock size={10} /> Pendente
+                              </span>
+                            )}
+                          </div>
+                          <p className="font-serif text-xl text-primary">{booking.price}</p>
+                          {booking.userIP && (
+                            <p className="text-[9px] text-gray-400 mt-2 font-mono opacity-60">ID: {booking.userIP}</p>
+                          )}
+                        </div>
+                        <div className="text-right">
+                          <p className="text-xs font-bold text-text-base">{booking.date.split('-').reverse().join('/')}</p>
+                          <p className="text-xs text-accent font-medium">{booking.time}</p>
+                        </div>
+                      </div>
+
+                      <div className="pt-4 border-t border-border-base/50 flex flex-col gap-3">
+                        {booking.status === 'pendente' && (
+                          <button 
+                            onClick={() => {
+                              setSelectedService({ name: booking.serviceName, price: booking.price });
+                              setSelectedDate(new Date(booking.date + 'T12:00:00'));
+                              setSelectedTime(booking.time);
+                              setCurrentBookingId(booking.id);
+                              setWaSent(true);
+                              setIsBookingModalOpen(true);
+                              setStep(4);
+                              setIsMyBookingsModalOpen(false);
+                            }}
+                            className="w-full bg-primary text-white py-3 rounded-2xl text-[10px] uppercase tracking-widest font-bold transition-all shadow-lg shadow-primary/20 hover:scale-[1.02]"
+                          >
+                            Concluir Agendamento
+                          </button>
+                        )}
+                        {canCancel(booking.date) ? (
+                          <button 
+                            disabled={deletingId !== null}
+                            onClick={() => setBookingToCancel(booking)}
+                            className={`w-full py-3 rounded-2xl text-[10px] uppercase tracking-widest font-bold transition-all flex items-center justify-center gap-2 ${
+                              deletingId === booking.id 
+                                ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                                : 'bg-red-50 text-red-500 hover:bg-red-500 hover:text-white'
+                            }`}
+                          >
+                            {deletingId === booking.id ? (
+                              <>Processando...</>
+                            ) : (
+                              <><X size={12} /> Cancelar Agendamento</>
+                            )}
+                          </button>
+                        ) : (
+                          <div className="w-full bg-gray-50 text-gray-400 py-3 rounded-2xl text-[9px] uppercase tracking-widest font-bold text-center italic">
+                            Cancelamento indisponível (Prazo excedido)
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+
+                  {myBookingsDetails.length === 0 && (
+                    <div className="py-12 text-center space-y-4">
+                      <div className="w-16 h-16 bg-gray-50 rounded-full flex items-center justify-center mx-auto">
+                        <Calendar className="text-gray-300" size={32} />
+                      </div>
+                      <p className="text-sm text-gray-400 font-light italic">
+                        Você ainda não realizou nenhum agendamento neste dispositivo.
+                      </p>
+                      <button 
+                        onClick={() => { setIsMyBookingsModalOpen(false); setIsBookingModalOpen(true); }}
+                        className="bg-primary text-white px-8 py-3 rounded-full text-[10px] uppercase tracking-widest font-bold"
+                      >
+                        Agendar agora
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
             </motion.div>
           </div>
         )}

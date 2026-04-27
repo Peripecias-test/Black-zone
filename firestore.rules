@@ -32,8 +32,11 @@ service cloud.firestore {
                    && isValidId(bookingId)
                    && !exists(/databases/$(database)/documents/bookings/$(bookingId));
       
-      // Prevent editing or deleting existing bookings by public
-      allow update, delete: if false;
+      // Allow deletion for users to manage their own bookings (identified by possession of ID in frontend)
+      allow delete: if true;
+      
+      // Prevent editing existing bookings
+      allow update: if false;
     }
   }
 }
