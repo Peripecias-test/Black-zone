@@ -586,11 +586,14 @@ export default function App() {
     }
   };
 
-  const finalizeBooking = async (bypassLoginPrompt: boolean = false) => {
+  const finalizeBooking = async (bypassLoginPrompt: any = false) => {
     if (!currentBookingId || isBooking || !selectedService || !selectedDate || !selectedTime) return;
     
+    // Explicitly check for boolean true to bypass. Event objects are truthy but not boolean true.
+    const shouldBypass = bypassLoginPrompt === true;
+
     // Se não estiver logado e não for um bypass, mostra o modal de persuasão
-    if (!user && !bypassLoginPrompt) {
+    if (!user && !shouldBypass) {
       setShowPersuasiveBookingModal(true);
       return;
     }
@@ -1623,23 +1626,17 @@ export default function App() {
                             </div>
                           </div>
                           <div className="space-y-4">
-                            <h3 className="text-3xl font-serif italic text-text-base leading-tight">Como reservar</h3>
-                            {!dontShowInstructions && (
-                              <div className="space-y-6 text-sm text-gray-500 font-light leading-relaxed max-w-[280px] mx-auto text-left">
-                                <div className="flex gap-4">
-                                  <div className="w-6 h-6 rounded-full bg-primary/10 text-primary flex items-center justify-center text-[10px] font-bold shrink-0">1</div>
-                                  <p>Abra o WhatsApp e <strong>envie a mensagem</strong> automática que preparamos.</p>
-                                </div>
-                                <div className="flex gap-4">
-                                  <div className="w-6 h-6 rounded-full bg-primary/10 text-primary flex items-center justify-center text-[10px] font-bold shrink-0">2</div>
-                                  <p><strong>Retorne imediatamente</strong> a este site para confirmar sua reserva.</p>
-                                </div>
-                                <div className="flex gap-4">
-                                  <div className="w-6 h-6 rounded-full bg-amber-50 text-amber-600 flex items-center justify-center text-[10px] font-bold shrink-0 italic">!</div>
-                                  <p>A vaga só é garantida após você clicar em <strong>"Confirmar"</strong> aqui no site.</p>
-                                </div>
+                            <h3 className="text-3xl font-serif italic text-text-base leading-tight">Agendamento rápido</h3>
+                            <div className="space-y-6 text-sm text-gray-500 font-light leading-relaxed max-w-[280px] mx-auto text-left">
+                              <div className="flex gap-4">
+                                <div className="w-6 h-6 rounded-full bg-primary/10 text-primary flex items-center justify-center text-[10px] font-bold shrink-0">1</div>
+                                <p>Clique no botão abaixo para abrir o WhatsApp.</p>
                               </div>
-                            )}
+                              <div className="flex gap-4">
+                                <div className="w-6 h-6 rounded-full bg-primary/10 text-primary flex items-center justify-center text-[10px] font-bold shrink-0">2</div>
+                                <p>Envie a mensagem e <strong>retorne aqui</strong> para confirmar.</p>
+                              </div>
+                            </div>
 
                             <div className="flex items-center justify-center gap-3 py-2">
                               <label className="flex items-center gap-3 cursor-pointer group">
@@ -1695,7 +1692,7 @@ export default function App() {
                       
                       <div className="flex flex-col gap-4 pt-4">
                         <button 
-                          onClick={finalizeBooking}
+                          onClick={() => finalizeBooking()}
                           disabled={isBooking}
                           className={`w-full py-6 rounded-2xl font-sans text-xs uppercase tracking-[0.3em] font-bold transition-all shadow-xl ${
                             isBooking 
@@ -1744,29 +1741,20 @@ export default function App() {
                 <X size={24} />
               </button>
 
-              {!cancelWaSent ? (
-                <div className="space-y-8">
-                  <div className="w-20 h-20 bg-red-50 text-red-500 rounded-full flex items-center justify-center mx-auto mb-4 border border-red-100 flex-col relative">
-                    <Smartphone size={32} strokeWidth={1.5} />
-                    <div className="absolute -right-2 top-0 bg-white p-2 rounded-full border border-red-100">
-                      <ExternalLink size={12} />
-                    </div>
-                  </div>
-                  
-                  <div className="space-y-4">
-                    <h3 className="text-3xl font-serif italic text-text-base leading-tight">Como cancelar</h3>
-                    {!dontShowInstructions && (
-                      <div className="space-y-5 text-sm text-gray-500 font-light leading-relaxed text-left">
-                        <div className="flex gap-4">
-                          <div className="w-6 h-6 rounded-full bg-red-50 text-red-600 flex items-center justify-center text-[10px] font-bold shrink-0">1</div>
-                          <p>Abra o WhatsApp e <strong>avise o barbeiro</strong> sobre o cancelamento.</p>
-                        </div>
-                        <div className="flex gap-4">
-                          <div className="w-6 h-6 rounded-full bg-red-50 text-red-600 flex items-center justify-center text-[10px] font-bold shrink-0">2</div>
-                          <p><strong>Retorne aqui</strong> para remover o horário do sistema e liberá-lo para outros.</p>
+                  {!cancelWaSent ? (
+                    <div className="space-y-8">
+                      <div className="w-20 h-20 bg-red-50 text-red-500 rounded-full flex items-center justify-center mx-auto mb-4 border border-red-100 flex-col relative">
+                        <Smartphone size={32} strokeWidth={1.5} />
+                        <div className="absolute -right-2 top-0 bg-white p-2 rounded-full border border-red-100">
+                          <ExternalLink size={12} />
                         </div>
                       </div>
-                    )}
+                      
+                      <div className="space-y-4">
+                        <h3 className="text-3xl font-serif italic text-text-base leading-tight">Confirmar cancelamento?</h3>
+                        <div className="space-y-5 text-sm text-gray-500 font-light leading-relaxed text-left">
+                          <p className="text-center italic">Você será redirecionado ao WhatsApp para avisar o barbeiro.</p>
+                        </div>
 
                     <div className="flex items-center justify-center gap-3 pt-4">
                       <label className="flex items-center gap-3 cursor-pointer group">
