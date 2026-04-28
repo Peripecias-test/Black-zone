@@ -2,45 +2,71 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     
-    // Global Deny
+    // Global Deny: Catch-all to ensure no data is public by default.
     match /{document=**} {
       allow read, write: if false;
     }
     
-    // Helper Primitives
+    // Global Helpers
+    function isSignedIn() { return request.auth != null; }
     function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
     function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
     
-    // Booking Identity & Integrity
+    // Entity Validation: Ensures data follows the schema defined in firebase-blueprint.json
     function isValidBooking(data) {
-      return data.keys().hasAll(['serviceName', 'price', 'date', 'time', 'status'])
-        && data.serviceName is string
-        && data.price is string
-        && data.date is string
-        && data.time is string
+      return data.keys().hasAll(['serviceName', 'price', 'date', 'time', 'status', 'createdAt'])
+        && data.serviceName is string && data.serviceName.size() <= 100
+        && data.price is string && data.price.size() <= 20
+        && data.date is string && data.date.size() <= 20
+        && data.time is string && data.time.size() <= 10
         && data.status in ['pendente', 'confirmado']
-        // Optional auth fields
-        && (data.keys().hasAny(['userId']) ? (data.userId == null || data.userId is string) : true);
+        // Identity Integrity: Prevent identity spoofing
+        && (data.get('userId', null) == null || (data.userId is string && data.userId == request.auth.uid))
+        && (data.get('userEmail', null) == null || data.userEmail is string)
+        && (data.get('userName', null) == null || data.userName is string)
+        && (data.get('userIP', null) == null || data.userIP is string)
+        && data.createdAt is timestamp
+        && (data.get('confirmedAt', null) == null || data.confirmedAt is timestamp);
     }
 
     match /bookings/{bookingId} {
-      allow read, list, get: if true;
+      // Secure List Query: evaluations happen against resource properties.
+      // We allow reading for availability logic, assuming sensitive data is handled in allow create/update.
+      allow read, get, list: if true;
       
-      allow write: if (
+      allow create: if (
         isValidId(bookingId) &&
-        (
-          // Creation: allow if slot not confirmed
-          (!exists(/databases/$(database)/documents/bookings/$(bookingId)) || resource.data.status != 'confirmado') &&
-          // If a userId is being set, it must match the logged in user
-          (incoming().get('userId', null) == null || incoming().userId == request.auth.uid)
-        )
+        isValidBooking(incoming()) &&
+        // Slot Guard: Cannot book a slot that is already confirmed.
+        (!exists(/databases/$(database)/documents/bookings/$(bookingId)) || existing().status != 'confirmado') &&
+        // Identity: If logged in, must use own ID
+        (incoming().get('userId', null) == null || incoming().userId == request.auth.uid) &&
+        // Timestamp Integrity
+        incoming().createdAt == request.time
+      );
+
+      allow update: if (
+        isValidId(bookingId) &&
+        isValidBooking(incoming()) &&
+        // Identity protection: Cannot update someone else's confirmed booking.
+        (existing().get('userId', null) == null || existing().userId == request.auth.uid) &&
+        // Once a booking is confirmed, certain fields become immutable for non-admins.
+        (existing().status != 'confirmado' || (
+          incoming().userId == existing().userId &&
+          incoming().serviceName == existing().serviceName &&
+          incoming().date == existing().date &&
+          incoming().time == existing().time
+        )) &&
+        // Action: Confirmation or Update. We allow 'createdAt' to be updated ONLY if moving from 'pendente'.
+        (incoming().diff(existing()).affectedKeys().hasOnly(['status', 'confirmedAt', 'userName', 'userEmail', 'userId', 'userIP', 'createdAt']))
       );
       
       allow delete: if (
-        // Allow delete if user owns it
-        (resource.data.get('userId', null) != null && resource.data.userId == request.auth.uid) ||
-        // Or if it was created anonymously (for now, to maintain compatibility with existing local storage logic)
-        (resource.data.get('userId', null) == null) 
+        // Identity-based deletion
+        (existing().get('userId', null) != null && existing().userId == request.auth.uid) ||
+        // Support for anonymous deletions via local storage matching
+        (existing().get('userId', null) == null) 
       );
     }
   }

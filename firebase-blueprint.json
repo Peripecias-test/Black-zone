@@ -2,23 +2,28 @@
   "entities": {
     "Booking": {
       "title": "Booking",
-      "description": "A scheduled appointment at the barber shop",
+      "description": "Represents a service appointment at the barbershop.",
       "type": "object",
       "properties": {
-        "serviceName": { "type": "string" },
-        "price": { "type": "string" },
-        "day": { "type": "string" },
-        "time": { "type": "string" },
-        "createdAt": { "type": "string", "format": "date-time" },
-        "userId": { "type": "string" }
+        "serviceName": { "type": "string", "description": "Name of the service (e.g., Barba, Cabelo)." },
+        "price": { "type": "string", "description": "Price of the service." },
+        "date": { "type": "string", "format": "date", "description": "Booking date (YYYY-MM-DD)." },
+        "time": { "type": "string", "description": "Booking time (HH:mm or HHmm)." },
+        "status": { "type": "string", "enum": ["pendente", "confirmado"], "description": "Current status of the booking." },
+        "userIP": { "type": "string", "description": "IP address of the user who made the booking." },
+        "userId": { "type": "string", "description": "Firebase Auth UID if the user is logged in." },
+        "userEmail": { "type": "string", "description": "User email if logged in." },
+        "userName": { "type": "string", "description": "User display name if logged in." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Timestamp of creation." },
+        "confirmedAt": { "type": "string", "format": "date-time", "description": "Timestamp of confirmation." }
       },
-      "required": ["serviceName", "price", "day", "time", "createdAt"]
+      "required": ["serviceName", "price", "date", "time", "status"]
     }
   },
   "firestore": {
-    "bookings": {
+    "/bookings/{bookingId}": {
       "schema": "Booking",
-      "description": "Collection of all client appointments"
+      "description": "Collection of all service appointments."
     }
   }
 }
