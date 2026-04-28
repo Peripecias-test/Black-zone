@@ -153,7 +153,13 @@ export default function App() {
   const [showWaInstruction, setShowWaInstruction] = useState(false);
   const [cancelWaSent, setCancelWaSent] = useState(false);
   const [showCancelInstruction, setShowCancelInstruction] = useState(false);
-  const [dontShowInstructions, setDontShowInstructions] = useState(() => localStorage.getItem('legado_skip_instructions') === 'true');
+  const [dontShowInstructions, setDontShowInstructions] = useState(() => {
+    try {
+      return localStorage.getItem('legado_skip_instructions') === 'true';
+    } catch {
+      return false;
+    }
+  });
   const [currentBookingId, setCurrentBookingId] = useState<string | null>(null);
   const [user, setUser] = useState<User | null>(null);
   const [isLoginExplainerOpen, setIsLoginExplainerOpen] = useState(false);
@@ -283,7 +289,13 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  const [googleAccessToken, setGoogleAccessToken] = useState<string | null>(() => localStorage.getItem('google_access_token'));
+  const [googleAccessToken, setGoogleAccessToken] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem('google_access_token');
+    } catch {
+      return null;
+    }
+  });
 
   useEffect(() => {
     const unsubscribeAuth = onAuthStateChanged(auth, (u) => {
@@ -301,7 +313,11 @@ export default function App() {
       const token = credential?.accessToken;
       if (token) {
         setGoogleAccessToken(token);
-        localStorage.setItem('google_access_token', token);
+        try {
+          localStorage.setItem('google_access_token', token);
+        } catch (e) {
+          console.warn('localStorage não disponível:', e);
+        }
       }
       setIsLoginExplainerOpen(false);
     } catch (error) {
@@ -312,11 +328,22 @@ export default function App() {
   const logout = () => {
     signOut(auth);
     setGoogleAccessToken(null);
-    localStorage.removeItem('google_access_token');
+    try {
+      localStorage.removeItem('google_access_token');
+    } catch (e) {
+      console.warn('localStorage não disponível:', e);
+    }
   };
 
   const createGoogleCalendarEvent = async (booking: any) => {
-    const token = googleAccessToken || localStorage.getItem('google_access_token');
+    let token = googleAccessToken;
+    if (!token) {
+      try {
+        token = localStorage.getItem('google_access_token');
+      } catch (e) {
+        console.warn('localStorage não disponível:', e);
+      }
+    }
     if (!token) return;
 
     try {
@@ -331,24 +358,36 @@ export default function App() {
       }
 
       const endDateTime = new Date(startDateTime.getTime() + 60 * 60 * 1000);
+      
+      // Calculate days difference for reminders
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const eventDate = new Date(startDateTime);
+      eventDate.setHours(0, 0, 0, 0);
+      const diffTime = eventDate.getTime() - today.getTime();
+      const daysDifference = Math.floor(diffTime / (1000 * 60 * 60 * 24));
 
       const event = {
         summary: `💈 Agendamento: ${booking.serviceName} - Legado da Barba`,
         description: `Agendamento de ${booking.serviceName} realizado via Legado da Barba.\n\nServiço: ${booking.serviceName}\nData: ${booking.date}\nHorário: ${normalizedTime}`,
         start: {
           dateTime: startDateTime.toISOString(),
-          timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          timeZone: 'America/Sao_Paulo',
         },
         end: {
           dateTime: endDateTime.toISOString(),
-          timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          timeZone: 'America/Sao_Paulo',
         },
         reminders: {
           useDefault: false,
-          overrides: [
-            { method: 'popup', minutes: 1440 }, // 1 day before
-            { method: 'popup', minutes: 60 },   // 1 hour before
-          ],
+          overrides: daysDifference >= 1 
+            ? [
+                { method: 'email', minutes: 1440 }, // 1 day before
+                { method: 'email', minutes: 60 },   // 1 hour before
+              ]
+            : [
+                { method: 'email', minutes: 60 },   // 1 hour before
+              ],
         },
       };
 
@@ -363,7 +402,11 @@ export default function App() {
 
       if (response.status === 401) {
         // Token expired
-        localStorage.removeItem('google_access_token');
+        try {
+          localStorage.removeItem('google_access_token');
+        } catch (e) {
+          console.warn('localStorage não disponível:', e);
+        }
         setGoogleAccessToken(null);
         throw new Error('Sua sessão do Google Agenda expirou. Por favor, entre novamente na próxima vez.');
       }
