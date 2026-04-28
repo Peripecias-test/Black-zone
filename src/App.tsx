@@ -357,8 +357,15 @@ export default function App() {
     if (!token) return;
 
     try {
-      // Normalize time to HH:mm
-      const normalizedTime = booking.time.includes(':') ? booking.time : `${booking.time.slice(0,2)}:${booking.time.slice(2)}`;
+      // Normalize time to HH:mm with leading zeros if necessary
+      let timePart = booking.time;
+      if (!timePart.includes(':')) {
+        if (timePart.length === 3) timePart = '0' + timePart;
+      } else {
+        const [h, m] = timePart.split(':');
+        timePart = `${h.padStart(2, '0')}:${m.padStart(2, '0')}`;
+      }
+      const normalizedTime = timePart.includes(':') ? timePart : `${timePart.slice(0,2)}:${timePart.slice(2)}`;
       
       const startDateTimeString = `${booking.date}T${normalizedTime}:00`;
       const startDateTime = new Date(startDateTimeString);
@@ -378,8 +385,8 @@ export default function App() {
       const daysDifference = Math.floor(diffTime / (1000 * 60 * 60 * 24));
 
       const event = {
-        summary: `💈 Agendamento: ${booking.serviceName} - Legado da Barba`,
-        description: `Agendamento de ${booking.serviceName} realizado via Legado da Barba.\n\nServiço: ${booking.serviceName}\nData: ${booking.date}\nHorário: ${normalizedTime}`,
+        summary: `💈 ${booking.serviceName} - ${booking.userName || 'Cliente'} (Legado da Barba)`,
+        description: `Agendamento realizado via Legado da Barba.\n\nServiço: ${booking.serviceName}\nCliente: ${booking.userName || 'Não informado'}\nData: ${booking.date}\nHorário: ${normalizedTime}`,
         start: {
           dateTime: startDateTime.toISOString(),
           timeZone: 'America/Sao_Paulo',
@@ -392,14 +399,16 @@ export default function App() {
           useDefault: false,
           overrides: daysDifference >= 1 
             ? [
-                { method: 'email', minutes: 1440 }, // 1 day before
-                { method: 'email', minutes: 60 },   // 1 hour before
+                { method: 'popup', minutes: 1440 }, // 1 dia antes
+                { method: 'popup', minutes: 60 },   // 1 hora antes
               ]
             : [
-                { method: 'email', minutes: 60 },   // 1 hour before
+                { method: 'popup', minutes: 60 },   // 1 hora antes
               ],
         },
       };
+
+      console.log('Enviando para Google Calendar:', event);
 
       const response = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
         method: 'POST',
@@ -411,24 +420,27 @@ export default function App() {
       });
 
       if (response.status === 401) {
-        // Token expired
         try {
           localStorage.removeItem('google_access_token');
         } catch (e) {
           console.warn('localStorage não disponível:', e);
         }
         setGoogleAccessToken(null);
-        throw new Error('Sua sessão do Google Agenda expirou. Por favor, entre novamente na próxima vez.');
+        alert('Sua sessão do Google Agenda expirou. Faça login novamente para sincronizar seu próximo agendamento.');
+        return;
       }
 
       if (!response.ok) {
         const err = await response.json();
-        throw new Error(err.error?.message || 'Falha ao criar evento no Google Agenda');
+        console.error('Google Calendar Error:', err);
+        throw new Error(err.error?.message || 'Erro do Google Agenda');
       }
       
-      console.log('Evento criado no Google Agenda com sucesso!');
+      console.log('Evento criado no Google Agenda!');
+      alert('Horário adicionado ao seu Google Agenda com sucesso! 📅');
     } catch (error: any) {
-      console.error('Erro ao integrar com Google Agenda:', error);
+      console.error('Erro no Google Agenda:', error);
+      alert('Não foi possível sincronizar com seu Google Agenda: ' + error.message);
     }
   };
 
