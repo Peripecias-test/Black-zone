@@ -173,6 +173,7 @@ export default function App() {
   const [currentBookingId, setCurrentBookingId] = useState<string | null>(null);
   const [user, setUser] = useState<User | null>(null);
   const [isLoginExplainerOpen, setIsLoginExplainerOpen] = useState(false);
+  const [showPersuasiveBookingModal, setShowPersuasiveBookingModal] = useState(false);
   
   // New State for persistence
   const [bookings, setBookings] = useState<{date: string, time: string}[]>([]);
@@ -330,6 +331,7 @@ export default function App() {
         }
       }
       setIsLoginExplainerOpen(false);
+      setShowPersuasiveBookingModal(false);
     } catch (error) {
       console.error("Erro no login:", error);
     }
@@ -584,10 +586,17 @@ export default function App() {
     }
   };
 
-  const finalizeBooking = async () => {
+  const finalizeBooking = async (bypassLoginPrompt: boolean = false) => {
     if (!currentBookingId || isBooking || !selectedService || !selectedDate || !selectedTime) return;
     
+    // Se não estiver logado e não for um bypass, mostra o modal de persuasão
+    if (!user && !bypassLoginPrompt) {
+      setShowPersuasiveBookingModal(true);
+      return;
+    }
+
     setIsBooking(true);
+    setShowPersuasiveBookingModal(false); // Fecha o modal se estiver aberto
     
     try {
       const docRef = doc(db, 'bookings', currentBookingId);
@@ -723,11 +732,14 @@ export default function App() {
     }
   };
 
-  const toggleSkipInstructions = (checked: boolean, thenDo?: () => void) => {
+  const toggleSkipInstructions = (checked: boolean) => {
     setDontShowInstructions(checked);
     localStorage.setItem('legado_skip_instructions', String(checked));
-    if (checked && thenDo) {
-      thenDo();
+    
+    // Se o usuário marcou para não mostrar, fechamos as instruções atuais
+    if (checked) {
+      setShowWaInstruction(false);
+      setShowCancelInstruction(false);
     }
   };
 
@@ -1358,6 +1370,58 @@ export default function App() {
       </AnimatePresence>
 
       <AnimatePresence>
+        {showPersuasiveBookingModal && (
+          <div className="fixed inset-0 z-[200] flex items-center justify-center p-6">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 bg-black/80 backdrop-blur-md"
+              onClick={() => setShowPersuasiveBookingModal(false)}
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="bg-white w-full max-w-sm rounded-[2rem] overflow-hidden relative shadow-2xl p-8 z-[210] text-center"
+            >
+              <div className="w-20 h-20 bg-primary/5 text-primary rounded-full flex items-center justify-center mx-auto mb-6 border border-primary/10">
+                <Star size={32} strokeWidth={1.5} className="animate-pulse" />
+              </div>
+              
+              <div className="space-y-4 mb-8">
+                <h3 className="text-2xl font-serif italic text-text-base leading-tight">Experiência VIP</h3>
+                <p className="text-sm text-gray-500 font-light leading-relaxed">
+                  Ao entrar com o <strong className="text-primary italic">Google</strong>, seu agendamento será sincronizado automaticamente e você receberá lembretes inteligentes.
+                </p>
+              </div>
+
+              <div className="flex flex-col gap-3">
+                <button 
+                  onClick={loginWithGoogle}
+                  className="w-full bg-primary text-white py-4 rounded-2xl font-sans text-xs uppercase tracking-[0.2em] font-bold hover:bg-primary/95 transition-all shadow-xl shadow-primary/20 flex items-center justify-center gap-3"
+                >
+                  Entrar com Google <LogIn size={14} />
+                </button>
+                <button 
+                  onClick={() => finalizeBooking(true)}
+                  className="w-full py-4 text-[10px] uppercase tracking-widest font-bold text-accent hover:text-primary transition-colors"
+                >
+                  Continuar sem login
+                </button>
+                <button 
+                  onClick={() => setShowPersuasiveBookingModal(false)}
+                  className="mt-2 text-[8px] uppercase tracking-[0.2em] font-bold text-gray-400 hover:text-red-500 transition-colors"
+                >
+                  Cancelar e voltar
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
         {isBookingModalOpen && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
             <motion.div 
@@ -1584,7 +1648,7 @@ export default function App() {
                                     type="checkbox" 
                                     className="peer sr-only"
                                     checked={dontShowInstructions}
-                                    onChange={(e) => toggleSkipInstructions(e.target.checked, initiateWhatsApp)}
+                                    onChange={(e) => toggleSkipInstructions(e.target.checked)}
                                   />
                                   <div className="w-5 h-5 border-2 border-border-base rounded-md transition-all peer-checked:bg-primary peer-checked:border-primary group-hover:border-primary/50" />
                                   <Check className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-white scale-0 transition-transform peer-checked:scale-100" size={12} strokeWidth={3} />
@@ -1711,7 +1775,7 @@ export default function App() {
                             type="checkbox" 
                             className="peer sr-only"
                             checked={dontShowInstructions}
-                            onChange={(e) => toggleSkipInstructions(e.target.checked, confirmCancelWhatsApp)}
+                            onChange={(e) => toggleSkipInstructions(e.target.checked)}
                           />
                           <div className="w-5 h-5 border-2 border-border-base rounded-md transition-all peer-checked:bg-primary peer-checked:border-primary group-hover:border-primary/50" />
                           <Check className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-white scale-0 transition-transform peer-checked:scale-100" size={12} strokeWidth={3} />
