@@ -19,12 +19,22 @@ import {
   Menu,
   X,
   Star,
-  Check
+  Check,
+  LogIn,
+  LogOut,
+  User as UserIcon
 } from 'lucide-react';
 
 // Firebase Imports
 import { initializeApp } from 'firebase/app';
-import { getAuth } from 'firebase/auth';
+import { 
+  getAuth, 
+  onAuthStateChanged, 
+  signInWithPopup, 
+  GoogleAuthProvider, 
+  signOut,
+  User
+} from 'firebase/auth';
 import { 
   getFirestore, 
   collection, 
@@ -37,7 +47,9 @@ import {
   where,
   serverTimestamp,
   updateDoc,
-  getDocFromServer
+  getDocFromServer,
+  orderBy,
+  limit
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 
@@ -143,6 +155,8 @@ export default function App() {
   const [showCancelInstruction, setShowCancelInstruction] = useState(false);
   const [dontShowInstructions, setDontShowInstructions] = useState(() => localStorage.getItem('legado_skip_instructions') === 'true');
   const [currentBookingId, setCurrentBookingId] = useState<string | null>(null);
+  const [user, setUser] = useState<User | null>(null);
+  const [isLoginExplainerOpen, setIsLoginExplainerOpen] = useState(false);
   
   // New State for persistence
   const [bookings, setBookings] = useState<{date: string, time: string}[]>([]);
@@ -225,10 +239,7 @@ export default function App() {
   // Detect when user returns from WhatsApp
   useEffect(() => {
     const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible' && waSent && !isBooking) {
-        // Optional: you could trigger something here like a vibrate or a pulse on the confirm button
-        console.log("Usuário voltou do WhatsApp.");
-      }
+      // User returned from WhatsApp
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
@@ -272,10 +283,139 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
+  const [googleAccessToken, setGoogleAccessToken] = useState<string | null>(() => localStorage.getItem('google_access_token'));
+
   useEffect(() => {
-    const details = bookings.filter(b => userBookingIds.includes(b.id));
-    setMyBookingsDetails(details);
-  }, [userBookingIds, bookings]);
+    const unsubscribeAuth = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+    });
+    return () => unsubscribeAuth();
+  }, []);
+
+  const loginWithGoogle = async () => {
+    const provider = new GoogleAuthProvider();
+    provider.addScope('https://www.googleapis.com/auth/calendar.events');
+    try {
+      const result = await signInWithPopup(auth, provider);
+      const credential = GoogleAuthProvider.credentialFromResult(result);
+      const token = credential?.accessToken;
+      if (token) {
+        setGoogleAccessToken(token);
+        localStorage.setItem('google_access_token', token);
+      }
+      setIsLoginExplainerOpen(false);
+    } catch (error) {
+      console.error("Erro no login:", error);
+    }
+  };
+
+  const logout = () => {
+    signOut(auth);
+    setGoogleAccessToken(null);
+    localStorage.removeItem('google_access_token');
+  };
+
+  const createGoogleCalendarEvent = async (booking: any) => {
+    const token = googleAccessToken || localStorage.getItem('google_access_token');
+    if (!token) return;
+
+    try {
+      // Normalize time to HH:mm
+      const normalizedTime = booking.time.includes(':') ? booking.time : `${booking.time.slice(0,2)}:${booking.time.slice(2)}`;
+      
+      const startDateTimeString = `${booking.date}T${normalizedTime}:00`;
+      const startDateTime = new Date(startDateTimeString);
+      
+      if (isNaN(startDateTime.getTime())) {
+        throw new Error(`Data/Hora inválida: ${startDateTimeString}`);
+      }
+
+      const endDateTime = new Date(startDateTime.getTime() + 60 * 60 * 1000);
+
+      const event = {
+        summary: `💈 Agendamento: ${booking.serviceName} - Legado da Barba`,
+        description: `Agendamento de ${booking.serviceName} realizado via Legado da Barba.\n\nServiço: ${booking.serviceName}\nData: ${booking.date}\nHorário: ${normalizedTime}`,
+        start: {
+          dateTime: startDateTime.toISOString(),
+          timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        },
+        end: {
+          dateTime: endDateTime.toISOString(),
+          timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        },
+        reminders: {
+          useDefault: false,
+          overrides: [
+            { method: 'popup', minutes: 1440 }, // 1 day before
+            { method: 'popup', minutes: 60 },   // 1 hour before
+          ],
+        },
+      };
+
+      const response = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(event),
+      });
+
+      if (response.status === 401) {
+        // Token expired
+        localStorage.removeItem('google_access_token');
+        setGoogleAccessToken(null);
+        throw new Error('Sua sessão do Google Agenda expirou. Por favor, entre novamente na próxima vez.');
+      }
+
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.error?.message || 'Falha ao criar evento no Google Agenda');
+      }
+      
+      console.log('Evento criado no Google Agenda com sucesso!');
+    } catch (error: any) {
+      console.error('Erro ao integrar com Google Agenda:', error);
+    }
+  };
+
+  useEffect(() => {
+    const fetchMyDetails = async () => {
+      let idsToFetch = [...userBookingIds];
+      let details: any[] = [];
+
+      // Always filter from the real-time bookings first
+      const locallyMatched = bookings.filter(b => userBookingIds.includes(b.id));
+      details = [...locallyMatched];
+
+      // If logged in, fetch by userId too
+      if (user) {
+        try {
+          const q = query(
+            collection(db, 'bookings'), 
+            where('userId', '==', user.uid),
+            limit(40)
+          );
+          const snapshot = await getDocs(q);
+          const userBookings = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+          
+          // Merge and remove duplicates
+          const seen = new Set(details.map(d => d.id));
+          userBookings.forEach(ub => {
+            if (!seen.has(ub.id)) {
+              details.push(ub);
+            }
+          });
+        } catch (error) {
+          console.error("Erro ao buscar agendamentos do usuário:", error);
+        }
+      }
+
+      setMyBookingsDetails(details);
+    };
+
+    fetchMyDetails();
+  }, [user, userBookingIds, bookings]);
 
   const navLinks = [
     { name: 'Início', href: '#home' },
@@ -286,12 +426,7 @@ export default function App() {
   ];
 
   const isTimeOccupied = (dateStr: string, time: string) => {
-    return bookings.some(b => {
-      if (b.date !== dateStr || b.time !== time) return false;
-      
-      // Only confirmed bookings block the slot
-      return b.status === 'confirmado';
-    });
+    return bookings.some(b => b.date === dateStr && b.time === time && b.status === 'confirmado');
   };
 
   const isDayFull = (date: Date) => {
@@ -359,14 +494,12 @@ export default function App() {
       // WhatsApp Message
       const readableDate = selectedDate.toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' });
       const message = [
-        "✂️ *SOLICITAÇÃO DE AGENDAMENTO*",
+        "*SOLICITAÇÃO DE AGENDAMENTO*",
         "",
-        `📅 DATA: ${readableDate}`,
-        `⏰ HORA: ${String(selectedTime)}`,
-        `👤 SERVIÇO: ${String(selectedService.name)}`,
-        `💰 VALOR: ${String(selectedService.price)}`,
-        "",
-        `📍 IP: ${userIP || 'Gravado'}`,
+        `DATA: ${readableDate}`,
+        `HORA: ${String(selectedTime)}`,
+        `SERVIÇO: ${String(selectedService.name)}`,
+        `VALOR: ${String(selectedService.price)}`,
         "",
         "Estou enviando esta mensagem para confirmar meu interesse no horário. Por favor, reserve para mim!"
       ].join("\n");
@@ -403,21 +536,18 @@ export default function App() {
         time: selectedTime,
         userIP: userIP || 'Gravado via App',
         status: 'confirmado',
+        userId: user?.uid || null,
+        userEmail: user?.email || null,
+        userName: user?.displayName || null,
         createdAt: serverTimestamp(),
         confirmedAt: serverTimestamp()
       };
 
-      try {
-        await setDoc(docRef, bookingData);
-      } catch (error: any) {
-        console.error("Erro fatal no Firestore (setDoc):", error);
-        if (error.message.includes('permission-denied') || error.code === 'permission-denied') {
-          alert("Ops! Alguém acabou de reservar este horário ou houve um erro de validação. Por favor, tente escolher outro horário.");
-        } else {
-          handleFirestoreError(error, OperationType.WRITE, `bookings/${currentBookingId}`);
-        }
-        resetBooking();
-        return;
+      await setDoc(docRef, bookingData);
+
+      // Create Google Calendar event if user is logged in with Google
+      if (user) {
+        createGoogleCalendarEvent(bookingData);
       }
 
       // Save to local storage for "My Bookings"
@@ -434,8 +564,11 @@ export default function App() {
       });
 
     } catch (error: any) {
-      console.error("Erro ao finalizar agendamento:", error);
-      alert("Erro ao validar sua reserva. Mas não se preocupe, se você enviou a mensagem, o barbeiro já recebeu seus dados!");
+      if (error.message?.includes('permission-denied') || error.code === 'permission-denied') {
+        alert("Ops! Alguém acabou de reservar este horário ou houve um erro de validação (ex: regra de segurança). Por favor, tente escolher outro horário.");
+      } else {
+        handleFirestoreError(error, OperationType.WRITE, `bookings/${currentBookingId}`);
+      }
       resetBooking();
     } finally {
       setIsBooking(false);
@@ -475,11 +608,11 @@ export default function App() {
 
     const readableDate = new Date(bookingToCancel.date + 'T12:00:00').toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' });
     const message = [
-      "🚫 *CANCELAMENTO DE AGENDAMENTO*",
+      "*CANCELAMENTO DE AGENDAMENTO*",
       "",
-      `📅 DATA: ${readableDate}`,
-      `⏰ HORA: ${bookingToCancel.time}`,
-      `👤 SERVIÇO: ${bookingToCancel.serviceName}`,
+      `DATA: ${readableDate}`,
+      `HORA: ${bookingToCancel.time}`,
+      `SERVIÇO: ${bookingToCancel.serviceName}`,
       "",
       "Gostaria de informar que precisei cancelar este horário. Desculpe o transtorno!"
     ].join("\n");
@@ -593,6 +726,30 @@ export default function App() {
                 {link.name}
               </a>
             ))}
+
+            {user ? (
+              <div className="flex items-center gap-4 pl-4 border-l border-border-base">
+                <div className="text-right">
+                  <p className="text-[10px] font-bold text-text-base leading-none mb-1">{user.displayName}</p>
+                  <button onClick={logout} className="text-[8px] uppercase tracking-widest text-accent hover:text-red-500 transition-colors">Sair</button>
+                </div>
+                {user.photoURL ? (
+                  <img src={user.photoURL} alt={user.displayName || ''} className="w-8 h-8 rounded-full border border-border-base" />
+                ) : (
+                  <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center text-primary">
+                    <UserIcon size={14} />
+                  </div>
+                )}
+              </div>
+            ) : (
+              <button 
+                onClick={() => setIsLoginExplainerOpen(true)}
+                className="flex items-center gap-2 font-sans text-xs uppercase tracking-widest font-bold text-primary hover:text-primary/80 transition-colors"
+              >
+                <LogIn size={14} /> Entrar
+              </button>
+            )}
+
             <button 
               onClick={() => { setStep(1); setIsBookingModalOpen(true); }}
               className="bg-primary text-white px-6 py-3 font-sans text-xs uppercase tracking-widest hover:bg-primary/90 transition-all rounded-sm"
@@ -656,9 +813,33 @@ export default function App() {
                     {link.name}
                   </a>
                 ))}
+
+                {!user && (
+                  <button
+                    onClick={() => { setIsLoginExplainerOpen(true); setIsMenuOpen(false); }}
+                    className="flex items-center gap-3 text-xl font-serif italic text-primary hover:pl-2 transition-all"
+                  >
+                    <LogIn size={20} /> Login com Google
+                  </button>
+                )}
               </div>
 
               <div className="mt-auto space-y-6">
+                {user && (
+                  <div className="flex items-center gap-4 p-4 bg-bg-base rounded-2xl border border-border-base">
+                    {user.photoURL ? (
+                      <img src={user.photoURL} alt={user.displayName || ''} className="w-12 h-12 rounded-full border border-border-base" />
+                    ) : (
+                      <div className="w-12 h-12 rounded-full bg-primary/10 flex items-center justify-center text-primary">
+                        <UserIcon size={24} />
+                      </div>
+                    )}
+                    <div className="flex-1">
+                      <p className="text-xs font-bold text-text-base">{user.displayName}</p>
+                      <button onClick={logout} className="text-[10px] uppercase tracking-widest text-accent mt-1">Sair da conta</button>
+                    </div>
+                  </div>
+                )}
                 <button 
                   onClick={() => { setIsMenuOpen(false); setIsBookingModalOpen(true); }}
                   className="w-full bg-primary text-white py-5 rounded-xl font-sans text-[10px] uppercase tracking-widest font-bold shadow-xl shadow-primary/20"
@@ -1057,6 +1238,61 @@ export default function App() {
       </AnimatePresence>
 
       <AnimatePresence>
+        {isLoginExplainerOpen && (
+          <div className="fixed inset-0 z-[150] flex items-center justify-center p-6">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 bg-black/80 backdrop-blur-md"
+              onClick={() => setIsLoginExplainerOpen(false)}
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="bg-white w-full max-w-sm rounded-[2rem] overflow-hidden relative shadow-2xl p-8 z-[160]"
+            >
+              <button 
+                onClick={() => setIsLoginExplainerOpen(false)}
+                className="absolute top-6 right-6 text-gray-400 hover:text-primary transition-colors"
+              >
+                <X size={24} />
+              </button>
+
+              <div className="space-y-6 text-center">
+                <div className="w-20 h-20 bg-primary/5 text-primary rounded-full flex items-center justify-center mx-auto mb-4 border border-primary/10">
+                  <Calendar size={32} strokeWidth={1.5} />
+                </div>
+                
+                <div className="space-y-4">
+                  <h3 className="text-2xl font-serif italic text-text-base leading-tight">Sincronizar Agenda</h3>
+                  <p className="text-sm text-gray-500 font-light leading-relaxed">
+                    Deseja conectar sua conta Google para que seus agendamentos sejam <strong className="text-primary font-bold italic">adicionados automaticamente</strong> ao seu Google Agenda?
+                  </p>
+                </div>
+
+                <div className="flex flex-col gap-3 pt-4">
+                  <button 
+                    onClick={loginWithGoogle}
+                    className="w-full bg-primary text-white py-4 rounded-2xl font-sans text-xs uppercase tracking-[0.2em] font-bold hover:bg-primary/95 transition-all shadow-xl shadow-primary/10 flex items-center justify-center gap-3"
+                  >
+                    Sim, Quero Sincronizar <LogIn size={14} />
+                  </button>
+                  <button 
+                    onClick={() => setIsLoginExplainerOpen(false)}
+                    className="w-full py-4 text-[10px] uppercase tracking-widest font-bold text-gray-400 hover:text-accent transition-colors"
+                  >
+                    Agora não, obrigado
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
         {isBookingModalOpen && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
             <motion.div 
@@ -1299,7 +1535,7 @@ export default function App() {
                               disabled={isBooking}
                               className="w-full bg-primary text-white py-6 rounded-2xl font-sans text-xs uppercase tracking-[0.3em] font-bold hover:bg-primary/95 transition-all shadow-xl shadow-primary/20 flex items-center justify-center gap-3"
                             >
-                              {isBooking ? 'Reservando...' : <>Ir para o WhatsApp <ExternalLink size={14} /></>}
+                              {isBooking ? 'Processando...' : <>Ir para o WhatsApp <ExternalLink size={14} /></>}
                             </button>
                             <button 
                               onClick={() => setShowWaInstruction(false)}
@@ -1338,7 +1574,7 @@ export default function App() {
                               : 'bg-green-600 text-white hover:bg-green-700 shadow-green-600/20'
                           }`}
                         >
-                          {isBooking ? 'Reservando...' : 'Confirmar e Finalizar Agendamento'}
+                          {isBooking ? 'Finalizando...' : 'Confirmar e Finalizar Agendamento'}
                         </button>
                         <button 
                           onClick={() => setWaSent(false)}
@@ -1513,11 +1749,6 @@ export default function App() {
                         <div>
                           <div className="flex items-center gap-2 mb-1">
                             <p className="text-[10px] uppercase tracking-[0.2em] font-bold text-accent">{booking.serviceName}</p>
-                            {booking.status === 'pendente' && (
-                              <span className="bg-amber-50 text-amber-600 px-2 py-0.5 rounded-md text-[8px] font-bold uppercase tracking-widest border border-amber-100 flex items-center gap-1">
-                                <Clock size={10} /> Pendente
-                              </span>
-                            )}
                           </div>
                           <p className="font-serif text-xl text-primary">{booking.price}</p>
                           {booking.userIP && (
@@ -1531,23 +1762,6 @@ export default function App() {
                       </div>
 
                       <div className="pt-4 border-t border-border-base/50 flex flex-col gap-3">
-                        {booking.status === 'pendente' && (
-                          <button 
-                            onClick={() => {
-                              setSelectedService({ name: booking.serviceName, price: booking.price });
-                              setSelectedDate(new Date(booking.date + 'T12:00:00'));
-                              setSelectedTime(booking.time);
-                              setCurrentBookingId(booking.id);
-                              setWaSent(true);
-                              setIsBookingModalOpen(true);
-                              setStep(4);
-                              setIsMyBookingsModalOpen(false);
-                            }}
-                            className="w-full bg-primary text-white py-3 rounded-2xl text-[10px] uppercase tracking-widest font-bold transition-all shadow-lg shadow-primary/20 hover:scale-[1.02]"
-                          >
-                            Concluir Agendamento
-                          </button>
-                        )}
                         {canCancel(booking.date) ? (
                           <button 
                             disabled={deletingId !== null}

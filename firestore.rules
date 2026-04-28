@@ -13,13 +13,14 @@ service cloud.firestore {
     
     // Booking Identity & Integrity
     function isValidBooking(data) {
-      // Relaxed for debugging and ensuring functionality
       return data.keys().hasAll(['serviceName', 'price', 'date', 'time', 'status'])
         && data.serviceName is string
         && data.price is string
         && data.date is string
         && data.time is string
-        && data.status in ['pendente', 'confirmado'];
+        && data.status in ['pendente', 'confirmado']
+        // Optional auth fields
+        && (data.keys().hasAny(['userId']) ? (data.userId == null || data.userId is string) : true);
     }
 
     match /bookings/{bookingId} {
@@ -28,13 +29,19 @@ service cloud.firestore {
       allow write: if (
         isValidId(bookingId) &&
         (
-          // Allow creation/update if the slot is not confirmed yet or it's the same owner (simplified)
-          !exists(/databases/$(database)/documents/bookings/$(bookingId)) ||
-          resource.data.status != 'confirmado'
+          // Creation: allow if slot not confirmed
+          (!exists(/databases/$(database)/documents/bookings/$(bookingId)) || resource.data.status != 'confirmado') &&
+          // If a userId is being set, it must match the logged in user
+          (incoming().get('userId', null) == null || incoming().userId == request.auth.uid)
         )
       );
       
-      allow delete: if true;
+      allow delete: if (
+        // Allow delete if user owns it
+        (resource.data.get('userId', null) != null && resource.data.userId == request.auth.uid) ||
+        // Or if it was created anonymously (for now, to maintain compatibility with existing local storage logic)
+        (resource.data.get('userId', null) == null) 
+      );
     }
   }
 }
